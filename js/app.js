@@ -568,10 +568,14 @@ async function openDescriptionEditor(book) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function enrichBooks(books) {
+async function enrichBooks(books, onProgress = null) {
   let covers = 0, descs = 0;
   const needCover = books.filter(b => !b.hasCover);
   const needDesc = books.filter(b => !b.description && b.isbn);
+  const total = needCover.length + needDesc.length;
+  let done = 0;
+  const report = () => { if (onProgress) onProgress({ done, total, covers, descs }); };
+  report();
   for (const b of needCover) {
     try {
       const urls = await coverCandidates(b);
@@ -584,6 +588,8 @@ async function enrichBooks(books) {
         }
       }
     } catch {}
+    done++;
+    report();
     await sleep(250);
   }
   for (const b of needDesc) {
@@ -595,6 +601,8 @@ async function enrichBooks(books) {
         descs++;
       }
     } catch {}
+    done++;
+    report();
     await sleep(400);
   }
   if (covers || descs) {
@@ -632,6 +640,10 @@ async function renderSettings(view) {
     <div class="setrow">
       <div><div class="l">Fehlende Covers &amp; Beschreibungen nachladen</div><div class="s">Versucht pro Buch per ISBN/OLID ein Bild und einen Text zu finden</div></div>
       <button class="btn" id="s-covers">🖼</button>
+    </div>
+    <div class="enrich-status" id="enrich-status" hidden>
+      <div class="enrich-count">Nachgeladen 0/0 …</div>
+      <div class="enrich-track"><div class="enrich-bar" id="enrich-bar"></div></div>
     </div>
 
     <h2 style="font-size:16px;margin:22px 0 2px">Daten</h2>
@@ -705,11 +717,26 @@ async function renderSettings(view) {
   };
 
   view.querySelector("#s-covers").onclick = async (e) => {
+    const btn = e.target;
     const all = await allBooks();
     const missing = all.filter(b => !b.hasCover || (!b.description && b.isbn));
     if (!missing.length) { toast("Alle Bücher haben Cover & Beschreibung"); return; }
-    e.target.textContent = "⏳";
-    const { covers, descs } = await enrichBooks(missing);
+    const statusEl = view.querySelector("#enrich-status");
+    const barEl = view.querySelector("#enrich-bar");
+    btn.disabled = true;
+    btn.textContent = "⏳";
+    statusEl.hidden = false;
+    const update = ({ done, total, covers, descs }) => {
+      const count = `Nachgeladen ${done}/${total} · ${covers} Cover · ${descs} Beschreibungen`;
+      statusEl.querySelector(".enrich-count").textContent = count;
+      barEl.style.width = `${total ? Math.round(done / total * 100) : 100}%`;
+    };
+    update({ done: 0, total: missing.length, covers: 0, descs: 0 });
+    const { covers, descs } = await enrichBooks(missing, update);
+    btn.disabled = false;
+    btn.textContent = "🖼";
+    statusEl.hidden = true;
+    barEl.style.width = "0";
     if (!covers && !descs) toast("Online nichts neues gefunden");
     render();
   };

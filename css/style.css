@@ -191,5 +191,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); bo
 .setrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
 .setrow .l { font-weight: 600; font-size: 15px; }
 .setrow .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.enrich-status { padding: 10px 0 4px; }
+.enrich-count { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+.enrich-track { height: 6px; border-radius: 999px; background: var(--surface2); overflow: hidden; }
+.enrich-bar { height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
 .spinner { width: 26px; height: 26px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; margin: 24px auto; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

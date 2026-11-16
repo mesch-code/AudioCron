@@ -21,4 +21,4 @@ createServer(async (req, res) => {
     res.writeHead(404);
     res.end("not found");
   }
-}).listen(8777, () => console.log("ready on http://localhost:8777"));
+}).listen(Number(process.env.PORT) || 8777, () => console.log(`ready on http://localhost:${Number(process.env.PORT) || 8777}`));
