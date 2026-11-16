@@ -233,11 +233,16 @@ async function fetchOlDescription(isbn) {
         else if (w.description?.value) description = w.description.value;
       }
     }
+    const narrators = (ed.narrators || [])
+      .map(n => typeof n === "string" ? n : (n?.value || ""))
+      .filter(Boolean)
+      .join(", ");
     return {
       description,
       coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null,
       publisher: (ed.publishers || [])[0] || null,
-      pubDate: ed.publish_date || null
+      pubDate: ed.publish_date || null,
+      narrator: narrators || null
     };
   } catch { return null; }
 }
@@ -288,7 +293,8 @@ export async function fetchIsbnMetadata(isbn) {
   return {
     description: better,
     coverCandidates,
-    publisher: ol?.publisher || gb?.publisher || null
+    publisher: ol?.publisher || gb?.publisher || null,
+    narrator: ol?.narrator || gb?.narrator || null
   };
 }
 
@@ -317,6 +323,8 @@ export async function coverCandidates(book) {
       add(r.coverUrl);
       if (r.isbn13) add(`https://covers.openlibrary.org/b/isbn/${r.isbn13}-M.jpg`);
     }
+    const gb = await searchGermanAudiobooks(q);
+    for (const r of gb.slice(0, 10)) add(r.coverUrl);
   }
   const meta = book.isbn ? await fetchIsbnMetadata(book.isbn) : null;
   meta?.coverCandidates.forEach(add);

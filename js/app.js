@@ -4,7 +4,7 @@ import {
 } from "./db.js";
 import {
   searchCombined, isbnLookup, barcodeSupported, startBarcodeScan, resolveCover,
-  fetchIsbnMetadata, coverCandidates, descriptionCandidates, olCoverUrlFor
+  coverCandidates, descriptionCandidates, olCoverUrlFor, fetchIsbnMetadata
 } from "./api.js";
 import {
   importOpenreadsCsv, exportOpenreadsCsv, exportJson, importJson
@@ -633,51 +633,72 @@ async function openDescriptionEditor(book) {
 
 /* ---------- Automatisches Anreichern nach Import ---------- */
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function enrichBooks(books, onProgress = null) {
-  let covers = 0, descs = 0;
-  const needCover = books.filter(b => !b.hasCover);
-  const needDesc = books.filter(b => !b.description && b.isbn);
-  const total = needCover.length + needDesc.length;
+async function enrichBooks(books, onProgress = null, { full = false } = {}) {
+  let covers = 0, descs = 0, narrs = 0;
+  const queue = books.filter(b =>
+    !b.hasCover || (full && b.isbn && (!b.description || !b.narrator)));
+  const total = queue.length;
   let done = 0;
-  const report = () => { if (onProgress) onProgress({ done, total, covers, descs }); };
+  const report = () => { if (onProgress) onProgress({ done, total, covers, descs, narrs }); };
   report();
-  for (const b of needCover) {
-    try {
-      const urls = await coverCandidates(b);
-      for (const u of urls) {
-        if (await storeCover(b.id, u)) {
-          b.hasCover = true;
-          b.coverUrl = u;
-          covers++;
-          break;
+  const worker = async () => {
+    while (queue.length) {
+      const b = queue.shift();
+      try {
+        let meta = null;
+        if (full && b.isbn) {
+          try { meta = await fetchIsbnMetadata(b.isbn); } catch {}
         }
-      }
-    } catch {}
-    done++;
-    report();
-    await sleep(250);
-  }
-  for (const b of needDesc) {
-    try {
-      const meta = await fetchIsbnMetadata(b.isbn);
-      if (meta?.description) {
-        b.description = meta.description.trim();
-        if (meta.publisher && !b.publisher) b.publisher = meta.publisher;
-        descs++;
-      }
-    } catch {}
-    done++;
-    report();
-    await sleep(400);
-  }
-  if (covers || descs) {
+        if (!b.hasCover) {
+          const urls = meta?.coverCandidates?.length
+            ? meta.coverCandidates
+            : await coverCandidates(b);
+          for (const u of urls) {
+            if (await storeCover(b.id, u)) {
+              b.hasCover = true;
+              b.coverUrl = u;
+              covers++;
+              break;
+            }
+          }
+        }
+        if (meta) {
+          if (!b.description && meta.description) { b.description = meta.description.trim(); descs++; }
+          if (!b.narrator && meta.narrator) { b.narrator = meta.narrator; narrs++; }
+          if (!b.publisher && meta.publisher) b.publisher = meta.publisher;
+        }
+      } catch {}
+      done++;
+      report();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, total) }, worker));
+  if (covers || descs || narrs) {
     await bulkPut(books);
-    toast(`Nachgeladen: ${covers} Cover, ${descs} Beschreibungen`);
+    toast([covers ? `${covers} Cover` : "", descs ? `${descs} Beschreibungen` : "", narrs ? `${narrs} Sprecher` : ""]
+      .filter(Boolean).join(", ") + " nachgeladen");
     if (state.route === "library" || state.route === "stats") render();
   }
-  return { covers, descs };
+  return { covers, descs, narrs };
+}
+
+async function enrichImported(books) {
+  const need = books.filter(b =>
+    !b.hasCover || (b.isbn && (!b.description || !b.narrator)));
+  if (!need.length) return;
+  const update = ({ done, total, covers, descs, narrs }) => {
+    const statusEl = document.querySelector("#enrich-status");
+    if (!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.querySelector(".enrich-count").textContent =
+      `Import-Anreicherung ${done}/${total} · ${covers} Cover · ${descs} Beschreibungen · ${narrs} Sprecher`;
+    const bar = statusEl.querySelector(".enrich-bar");
+    if (bar) bar.style.width = `${total ? Math.round(done / total * 100) : 100}%`;
+  };
+  update({ done: 0, total: need.length, covers: 0, descs: 0, narrs: 0 });
+  await enrichBooks(books, update, { full: true });
+  const statusEl = document.querySelector("#enrich-status");
+  if (statusEl) statusEl.hidden = true;
 }
 
 /* ---------- Einstellungen ---------- */
@@ -687,7 +708,7 @@ async function renderSettings(view) {
   view.innerHTML = `
     <h2 style="font-size:16px;margin:6px 0 2px">Import / Export</h2>
     <div class="setrow">
-      <div><div class="l">CSV importieren (Openreads / Bookmori)</div><div class="s">CSV-Datei auswählen – Format wird automatisch erkannt</div></div>
+      <div><div class="l">CSV importieren (Openreads / Bookmori)</div><div class="s">CSV-Datei auswählen – Format wird automatisch erkannt; fehlende Cover/Beschreibungen/Sprecher werden direkt mitgeladen</div></div>
       <button class="btn" id="s-import">📥</button>
     </div>
     <div class="setrow">
@@ -705,7 +726,7 @@ async function renderSettings(view) {
 
     <h2 style="font-size:16px;margin:22px 0 2px">Covers &amp; Beschreibungen</h2>
     <div class="setrow">
-      <div><div class="l">Fehlende Covers &amp; Beschreibungen nachladen</div><div class="s">Versucht pro Buch per ISBN/OLID ein Bild und einen Text zu finden</div></div>
+      <div><div class="l">Fehlende Covers nachladen</div><div class="s">Nur für Bücher ohne Bild – parallel per ISBN/OLID/Titel</div></div>
       <button class="btn" id="s-covers">🖼</button>
     </div>
     <div class="enrich-status" id="enrich-status" hidden>
@@ -748,7 +769,7 @@ async function renderSettings(view) {
       await bulkPut(fresh);
       toast(`${fresh.length} importiert${skippedDup ? `, ${skippedDup} Duplikate übersprungen` : ""}${result.skipped ? `, ${result.skipped} gelöscht-Flags übersprungen` : ""}`);
       render();
-      enrichBooks(fresh);
+      enrichImported(fresh);
     } catch (e) {
       toast("Import fehlgeschlagen: " + e.message);
     }
@@ -786,25 +807,25 @@ async function renderSettings(view) {
   view.querySelector("#s-covers").onclick = async (e) => {
     const btn = e.target;
     const all = await allBooks();
-    const missing = all.filter(b => !b.hasCover || (!b.description && b.isbn));
-    if (!missing.length) { toast("Alle Bücher haben Cover & Beschreibung"); return; }
+    const missing = all.filter(b => !b.hasCover);
+    if (!missing.length) { toast("Alle Bücher haben ein Cover"); return; }
     const statusEl = view.querySelector("#enrich-status");
     const barEl = view.querySelector("#enrich-bar");
     btn.disabled = true;
     btn.textContent = "⏳";
     statusEl.hidden = false;
-    const update = ({ done, total, covers, descs }) => {
-      const count = `Nachgeladen ${done}/${total} · ${covers} Cover · ${descs} Beschreibungen`;
+    const update = ({ done, total, covers }) => {
+      const count = `Nachgeladen ${done}/${total} · ${covers} Cover`;
       statusEl.querySelector(".enrich-count").textContent = count;
       barEl.style.width = `${total ? Math.round(done / total * 100) : 100}%`;
     };
-    update({ done: 0, total: missing.length, covers: 0, descs: 0 });
-    const { covers, descs } = await enrichBooks(missing, update);
+    update({ done: 0, total: missing.length, covers: 0 });
+    const { covers } = await enrichBooks(missing, update);
     btn.disabled = false;
     btn.textContent = "🖼";
     statusEl.hidden = true;
     barEl.style.width = "0";
-    if (!covers && !descs) toast("Online nichts neues gefunden");
+    if (!covers) toast("Online nichts neues gefunden");
     render();
   };
 

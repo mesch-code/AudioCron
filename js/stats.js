@@ -4,6 +4,27 @@ import { esc, fmtHours, openSheet, closeSheet, toast, platformLabel, statusLabel
 
 const PL_COLORS = { bookbeat: "pl-bookbeat", borrowbox: "pl-borrowbox", andere: "" };
 
+const STAT_SORT = {
+  autoren: [
+    ["menge", "Häufigkeit"],
+    ["name", "Name A–Z"],
+    ["zeit", "Hörzeit"]
+  ],
+  sprecher: [
+    ["menge", "Häufigkeit"],
+    ["name", "Name A–Z"],
+    ["zeit", "Hörzeit"]
+  ],
+  monate: [
+    ["datum-alt", "Ältester zuerst"],
+    ["datum-neu", "Neuester zuerst"],
+    ["menge", "Häufigkeit"]
+  ]
+};
+
+let statTab = "autoren";
+let statSort = {};
+
 export async function renderStats(view) {
   const books = await allBooks();
   const listened = books.filter(b => b.status === "gehoert");
@@ -19,21 +40,51 @@ export async function renderStats(view) {
       <div class="statcard"><div class="n">${books.filter(b => b.status === "hoere").length}</div><div class="l">aktuell am Hören</div></div>
     </div>
     <div class="chiprow" id="stat-tabs">
-      <button class="chip active" data-tab="autoren">Autoren</button>
-      <button class="chip" data-tab="sprecher">Sprecher</button>
-      <button class="chip" data-tab="monate">Monate</button>
+      <button class="chip ${statTab === "autoren" ? "active" : ""}" data-tab="autoren">Autoren</button>
+      <button class="chip ${statTab === "sprecher" ? "active" : ""}" data-tab="sprecher">Sprecher</button>
+      <button class="chip ${statTab === "monate" ? "active" : ""}" data-tab="monate">Monate</button>
     </div>
+    <div class="searchbar"><select id="stat-sort"></select></div>
     <div id="stat-content"></div>`;
 
   const tabs = view.querySelector("#stat-tabs");
+  const sortSel = view.querySelector("#stat-sort");
+
+  const paintSortOptions = () => {
+    const opts = STAT_SORT[statTab];
+    if (!statSort[statTab]) statSort[statTab] = opts[0][0];
+    sortSel.innerHTML = opts.map(([v, l]) =>
+      `<option value="${v}" ${statSort[statTab] === v ? "selected" : ""}>Sortierung: ${l}</option>`).join("");
+  };
+
   tabs.addEventListener("click", e => {
     const chip = e.target.closest(".chip");
     if (!chip) return;
     tabs.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
     chip.classList.add("active");
-    renderTab(chip.dataset.tab, listened);
+    statTab = chip.dataset.tab;
+    paintSortOptions();
+    renderTab(statTab, listened);
   });
-  renderTab("autoren", listened);
+  sortSel.addEventListener("change", () => {
+    statSort[statTab] = sortSel.value;
+    renderTab(statTab, listened);
+  });
+  paintSortOptions();
+  renderTab(statTab, listened);
+}
+
+function groupHours(g) {
+  return g.books.reduce((s, b) => s + (b.lengthMin || 0), 0);
+}
+
+function sortGroups(groups, sort) {
+  const byName = (a, b) => a.key.localeCompare(b.key, "de");
+  if (sort === "name") return groups.sort(byName);
+  if (sort === "zeit") return groups.sort((a, b) => groupHours(b) - groupHours(a) || byName(a, b));
+  if (sort === "datum-neu") return groups.sort((a, b) => b.key.localeCompare(a.key));
+  if (sort === "datum-alt") return groups.sort((a, b) => a.key.localeCompare(b.key));
+  return groups.sort((a, b) => b.count - a.count || byName(a, b));
 }
 
 function renderTab(tab, listened) {
@@ -50,14 +101,16 @@ function renderTab(tab, listened) {
     el.innerHTML = `<div class="empty"><div class="big">📊</div>Noch keine gehörten Bücher.</div>`;
     return;
   }
-  const max = groups[0].count;
+  groups = sortGroups(groups, statSort[tab] || STAT_SORT[tab][0][0]);
+  const max = Math.max(...groups.map(g => (statSort[tab] === "zeit" ? groupHours(g) : g.count)), 1);
   el.innerHTML = `<div class="barlist">` + groups.map(g => {
     const label = tab === "monate" ? fmtMonth(g.key) : g.key;
-    const hours = g.books.reduce((s, b) => s + (b.lengthMin || 0), 0);
+    const value = statSort[tab] === "zeit" ? groupHours(g) : g.count;
+    const valueLabel = statSort[tab] === "zeit" ? fmtHours(value) : value;
     const clickable = tab !== "monate";
     return `<div class="barrow" ${clickable ? `data-key="${esc(g.key)}"` : ""}>
       <div class="lbl">${esc(label)}</div>
-      <div class="track"><div class="fill" style="width:${Math.max(8, Math.round(g.count / max * 100))}%">${g.count}</div></div>
+      <div class="track"><div class="fill" style="width:${Math.max(8, Math.round(value / max * 100))}%">${esc(valueLabel)}</div></div>
     </div>`;
   }).join("") + `</div>`;
   if (tab !== "monate") {
@@ -75,9 +128,7 @@ function groupCount(books, keyFn) {
     if (!map.has(k)) map.set(k, []);
     map.get(k).push(b);
   }
-  return [...map.entries()]
-    .map(([key, bs]) => ({ key, count: bs.length, books: bs }))
-    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key, "de"));
+  return [...map.entries()].map(([key, bs]) => ({ key, count: bs.length, books: bs }));
 }
 
 function fmtMonth(ym) {
