@@ -1,0 +1,771 @@
+import {
+  allBooks, getBook, putBook, deleteBook, bulkPut, clearAll,
+  getCoverUrl, storeCover, isDup, uid, norm
+} from "./db.js";
+import {
+  searchCombined, isbnLookup, barcodeSupported, startBarcodeScan, resolveCover,
+  fetchIsbnMetadata, coverCandidates, descriptionCandidates, olCoverUrlFor
+} from "./api.js";
+import {
+  importOpenreadsCsv, exportOpenreadsCsv, exportJson, importJson
+} from "./csv.js";
+import {
+  PLATFORMS, STATUSES, esc, toast, openSheet, closeSheet, stars,
+  fmtHours, fmtDate, download, spinner, platformLabel, statusLabel, APP_VERSION
+} from "./ui.js";
+import { renderStats, hydrateCovers, coverImg } from "./stats.js";
+
+const state = {
+  route: "library",
+  query: "",
+  platform: "alle",
+  status: "alle",
+  sort: "neu"
+};
+
+/* ---------- Router ---------- */
+
+function navigate(route) {
+  state.route = route;
+  document.querySelectorAll(".nav-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.route === route));
+  document.getElementById("fab").style.display = route === "library" ? "" : "none";
+  render();
+}
+
+async function render() {
+  const view = document.getElementById("view");
+  const title = document.getElementById("topbar-title");
+  if (state.route === "stats") {
+    title.textContent = "Statistik";
+    await renderStats(view);
+    return;
+  }
+  if (state.route === "settings") {
+    title.textContent = "Einstellungen";
+    await renderSettings(view);
+    return;
+  }
+  title.textContent = "AudioCron";
+  await renderLibrary(view);
+}
+
+/* ---------- Bibliothek ---------- */
+
+async function renderLibrary(view) {
+  const books = await allBooks();
+  view.innerHTML = `
+    <div class="searchbar">
+      <input id="q" type="search" placeholder="Titel, Autor, Sprecher suchen…" value="${esc(state.query)}">
+    </div>
+    <div class="chiprow" id="f-platform">
+      <button class="chip ${state.platform === "alle" ? "active" : ""}" data-platform="alle">Alle</button>
+      ${PLATFORMS.map(p => `<button class="chip ${state.platform === p.id ? "active" : ""}" data-platform="${p.id}">${p.label}</button>`).join("")}
+    </div>
+    <div class="chiprow" id="f-status">
+      <button class="chip ${state.status === "alle" ? "active" : ""}" data-status="alle">Alle Status</button>
+      ${STATUSES.map(s => `<button class="chip ${state.status === s.id ? "active" : ""}" data-status="${s.id}">${s.label}</button>`).join("")}
+    </div>
+    <div class="searchbar">
+      <select id="sort">
+        <option value="neu" ${state.sort === "neu" ? "selected" : ""}>Zuletzt hinzugefügt</option>
+        <option value="fertig" ${state.sort === "fertig" ? "selected" : ""}>Zuletzt beendet</option>
+        <option value="titel" ${state.sort === "titel" ? "selected" : ""}>Titel A–Z</option>
+        <option value="autor" ${state.sort === "autor" ? "selected" : ""}>Autor A–Z</option>
+      </select>
+    </div>
+    <div id="list"></div>`;
+
+  view.querySelector("#q").addEventListener("input", e => {
+    state.query = e.target.value;
+    paintList(books);
+  });
+  view.querySelector("#sort").addEventListener("change", e => {
+    state.sort = e.target.value;
+    paintList(books);
+  });
+  for (const id of ["f-platform", "f-status"]) {
+    view.querySelector("#" + id).addEventListener("click", e => {
+      const chip = e.target.closest(".chip");
+      if (!chip) return;
+      if (id === "f-platform") state.platform = chip.dataset.platform;
+      else state.status = chip.dataset.status;
+      view.querySelectorAll(`#${id} .chip`).forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      paintList(books);
+    });
+  }
+  paintList(books);
+}
+
+function filtered(books) {
+  const q = norm(state.query);
+  let list = books.filter(b => {
+    if (state.platform !== "alle" && b.platform !== state.platform) return false;
+    if (state.status !== "alle" && b.status !== state.status) return false;
+    if (q) {
+      const hay = norm([b.title, b.author, b.narrator, b.series].join(" "));
+      if (!q.split(" ").every(t => hay.includes(t))) return false;
+    }
+    return true;
+  });
+  const by = {
+    neu: (a, b) => (b.addedDate || "").localeCompare(a.addedDate || "") || b.createdAt - a.createdAt,
+    fertig: (a, b) => (b.finishDate || "").localeCompare(a.finishDate || ""),
+    titel: (a, b) => a.title.localeCompare(b.title, "de"),
+    autor: (a, b) => (a.author || "~~~").localeCompare(b.author || "~~~", "de") || a.title.localeCompare(b.title, "de")
+  };
+  list.sort(by[state.sort]);
+  return list;
+}
+
+async function paintList(books) {
+  const list = filtered(books);
+  const el = document.getElementById("list");
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="big">🎧</div>
+      ${books.length ? "Keine Treffer für deine Filter." : "Noch keine Bücher.<br>Tippe auf +, um loszulegen."}</div>`;
+    return;
+  }
+  const grouped = state.sort === "autor";
+  let html = "", current = null;
+  for (const b of list) {
+    if (grouped) {
+      const a = b.author || "Unbekannt";
+      if (a !== current) {
+        html += `<div class="grouphead">${esc(a)}</div>`;
+        current = a;
+      }
+    }
+    html += `
+      <div class="bookcard" data-id="${b.id}">
+        ${coverImg(b)}
+        <div class="bookinfo">
+          <div class="t">${esc(b.title)}${b.series ? ` <span style="color:var(--muted);font-weight:400;font-size:12px">· ${esc(b.series)}</span>` : ""}</div>
+          <div class="a">${esc(b.author)}${b.narrator ? ` · <span style="font-style:italic">${esc(b.narrator)}</span>` : ""}</div>
+          <div class="bookmeta">
+            <span class="badge ${b.platform}">${esc(platformLabel(b.platform))}</span>
+            <span class="badge ${b.status}">${esc(statusLabel(b.status))}</span>
+            ${b.lengthMin ? `<span style="color:var(--muted);font-size:11.5px">${fmtHours(b.lengthMin)}</span>` : ""}
+            ${b.status === "gehoert" && b.finishDate ? `<span style="color:var(--muted);font-size:11.5px">${fmtDate(b.finishDate)}</span>` : ""}
+            ${stars(b.rating)}
+          </div>
+        </div>
+      </div>`;
+  }
+  el.innerHTML = html;
+  hydrateCovers(el);
+  el.querySelectorAll(".bookcard").forEach(c =>
+    c.addEventListener("click", () => openDetail(c.dataset.id)));
+}
+
+/* ---------- Detail ---------- */
+
+export async function openDetail(id) {
+  const b = await getBook(id);
+  if (!b) return;
+  const coverUrl = b.hasCover ? await getCoverUrl(id) : (b.coverUrl || null);
+  const dupes = (await allBooks()).filter(o => o.id !== id && isDup(o, b));
+  const sheet = openSheet(`
+    <h2>${esc(b.title)}</h2>
+    <div class="detail-head">
+      <img src="${esc(coverUrl || "")}" ${coverUrl ? "" : 'style="display:none"'} alt="">
+      <div style="flex:1">
+        <div style="font-size:13px;color:var(--muted)">${esc(b.author)}</div>
+        <div class="bookmeta" style="margin-top:8px">
+          <span class="badge ${b.platform}">${esc(platformLabel(b.platform))}</span>
+          <span class="badge ${b.status}">${esc(statusLabel(b.status))}</span>
+        </div>
+        ${dupes.length ? `<div class="warnbox" style="margin-top:10px;font-size:12.5px">⚠ Kommt ${dupes.length}× weiter in deiner Liste vor (${esc(dupes[0].platform)}) – ggf. doppelt.</div>` : ""}
+      </div>
+    </div>
+    ${b.series ? row("Serie", esc(b.series) + (b.seriesInfo ? ` · ${esc(b.seriesInfo)}` : "")) : ""}
+    ${b.narrator ? row("Sprecher", esc(b.narrator)) : ""}
+    ${b.lengthMin ? row("Länge", fmtHours(b.lengthMin)) : ""}
+    ${b.publisher ? row("Verlag", esc(b.publisher)) : ""}
+    ${b.pubYear ? row("Erscheinung", esc(b.pubYear)) : ""}
+    ${b.isbn ? row("ISBN", esc(b.isbn)) : ""}
+    ${b.startDate ? row("Start", fmtDate(b.startDate)) : ""}
+    ${b.finishDate ? row("Beendet", fmtDate(b.finishDate)) : ""}
+    ${b.rating ? row("Bewertung", stars(b.rating)) : ""}
+    <div style="margin:12px 0 4px;display:flex;justify-content:space-between;align-items:center">
+      <strong style="font-size:14px">Beschreibung</strong>
+      <span class="linklike" id="d-desc-edit">✏️ Bearbeiten / nachladen</span>
+    </div>
+    <div class="descbox ${b.description ? "" : "empty-desc"}">${b.description ? esc(b.description) : 'Keine Beschreibung vorhanden – über „nachladen“ per ISBN/Titel suchen.'}</div>
+    ${b.notes ? row("Notizen", esc(b.notes)) : ""}
+    <div class="btnrow" style="margin-top:16px">
+      <button class="btn" id="d-cover">🖼 Cover korrigieren</button>
+      <button class="btn primary" id="d-edit">✏️ Bearbeiten</button>
+      <button class="btn danger" id="d-del">🗑</button>
+    </div>
+  `);
+  sheet.querySelector("#d-desc-edit").onclick = () => openDescriptionEditor(b);
+  sheet.querySelector("#d-cover").onclick = () => openCoverPicker(b);
+  sheet.querySelector("#d-edit").onclick = () => { closeSheet(); openBookForm(b); };
+  sheet.querySelector("#d-del").onclick = async () => {
+    if (!confirm(`„${b.title}" wirklich löschen?`)) return;
+    await deleteBook(id);
+    closeSheet();
+    toast("Gelöscht");
+    render();
+  };
+}
+
+function row(k, v) {
+  return `<div class="detail-field"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+}
+
+/* ---------- Hinzufügen ---------- */
+
+function openAddMenu() {
+  const hasScan = barcodeSupported();
+  const sheet = openSheet(`
+    <h2>Buch hinzufügen</h2>
+    <div class="addoptions">
+      <button class="addopt" id="opt-search"><span class="ico">🔍</span><span><span class="lbl">Online suchen</span><div class="sub">Titel, Autor oder ISBN – mit Cover</div></span></button>
+      <button class="addopt" id="opt-scan" ${hasScan ? "" : "disabled style=\"opacity:.45\""}><span class="ico">📷</span><span><span class="lbl">Barcode / ISBN scannen</span><div class="sub">${hasScan ? "Kamera auf Buchrücken halten" : "Nur mit Kamera-Unterstützung im Browser"}</div></span></button>
+      <button class="addopt" id="opt-manual"><span class="ico">✏️</span><span><span class="lbl">Manuell eingeben</span><div class="sub">Ohne Suche, alle Felder frei</div></span></button>
+    </div>
+  `);
+  sheet.querySelector("#opt-search").onclick = openSearchAdd;
+  sheet.querySelector("#opt-scan")?.addEventListener("click", () => {
+    if (hasScan) openScanAdd();
+  });
+  sheet.querySelector("#opt-manual").onclick = () => openBookForm(null);
+}
+
+async function openSearchAdd() {
+  const sheet = openSheet(`
+    <h2>Online suchen</h2>
+    <input id="s-q" type="search" placeholder="Titel, Autor oder ISBN…" autofocus>
+    <div id="s-results"></div>
+  `);
+  const input = sheet.querySelector("#s-q");
+  const out = sheet.querySelector("#s-results");
+  let timer = null;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) { out.innerHTML = ""; return; }
+      out.innerHTML = spinner();
+      const isIsbn = /^(\d[\d -]{8,16}[\dXx])$/.test(q);
+      const results = isIsbn ? await isbnLookup(q.replace(/[\s-]/g, "")) : await searchCombined(q);
+      renderSearchResults(out, results);
+    }, 350);
+  });
+  input.focus();
+}
+
+function renderSearchResults(out, results) {
+  if (!results.length) {
+    out.innerHTML = `<div class="empty">Nichts gefunden. Versuche manuell hinzuzufügen.</div>`;
+    return;
+  }
+  out.innerHTML = `<div class="results">` + results.map((r, i) => `
+    <div class="resultcard">
+      ${r.coverUrl ? `<img class="cover" src="${esc(r.coverUrl)}" loading="lazy" alt="">` : `<div class="cover placeholder">🎧</div>`}
+      <div class="bookinfo">
+        <div class="t">${esc(r.title)}</div>
+        <div class="a">${esc(r.author)}${r.year ? ` · ${r.year}` : ""}</div>
+      </div>
+      <button class="minibtn" data-i="${i}">+ Hinzufügen</button>
+    </div>`).join("") + `</div>`;
+  out.querySelectorAll(".minibtn").forEach(btn => {
+    btn.onclick = () => {
+      const r = results[parseInt(btn.dataset.i, 10)];
+      openBookForm(null, r);
+    };
+  });
+}
+
+async function openScanAdd() {
+  const sheet = openSheet(`
+    <h2>Barcode scannen</h2>
+    <div class="qrbox"><video id="qr-video" playsinline muted></video></div>
+    <p style="color:var(--muted);font-size:13px">ISBN-Barcode oder QR-Code scannen.</p>
+    <div class="form-row" style="margin-top:10px"><label>… oder ISBN manuell</label>
+      <input id="qr-manual" type="text" inputmode="numeric" placeholder="978…"></div>
+    <button class="btn block" id="qr-go">Suchen</button>
+  `);
+  let stopScan = null;
+  const video = sheet.querySelector("#qr-video");
+  const handle = async (code) => {
+    stopScan?.();
+    const isbn = code.replace(/[^0-9Xx]/g, "");
+    if (isbn.length < 8) { toast("Keine gültige ISBN erkannt"); return; }
+    const results = await isbnLookup(isbn);
+    if (results.length) openBookForm(null, results[0]);
+    else { toast("ISBN nicht gefunden – bitte manuell eingeben"); openBookForm(null, { title: "", author: "", isbn13: isbn }); }
+  };
+  try {
+    stopScan = await startBarcodeScan(video, handle);
+    document.addEventListener("sheetclosed", () => stopScan?.(), { once: true });
+  } catch {
+    video.parentElement.style.display = "none";
+    toast("Kamera nicht verfügbar – ISBN manuell eingeben");
+  }
+  sheet.querySelector("#qr-go").onclick = () => handle(sheet.querySelector("#qr-manual").value);
+}
+
+export function openQuickAdd(result) {
+  openBookForm(null, result);
+}
+
+export async function openBookForm(existing, result = null) {
+  const b = existing ? { ...existing } : {
+    id: uid(),
+    title: result?.title || "",
+    author: result?.author || "",
+    narrator: result?.narrator || "",
+    series: result?.series || "",
+    seriesInfo: "",
+    platform: (await guessLastPlatform()) || "bookbeat",
+    status: "gehoert",
+    finishDate: new Date().toISOString().slice(0, 10),
+    startDate: "",
+    addedDate: new Date().toISOString().slice(0, 10),
+    lengthMin: 0,
+    pages: 0,
+    rating: 0,
+    publisher: result?.publisher || "",
+    pubYear: result?.year ? String(result.year) : "",
+    isbn: result?.isbn13 || "",
+    coverUrl: result?.coverUrl || "",
+    hasCover: false,
+    notes: "",
+    tags: "",
+    olAuthorKey: result?.olAuthorKey || null,
+    createdAt: Date.now()
+  };
+  if (result && !b.coverUrl) b.coverUrl = result.coverUrl || "";
+
+  const dupes = (await allBooks()).filter(o => !existing || o.id !== existing.id);
+  const dup = dupes.find(o => isDup(o, { title: b.title, author: b.author }));
+
+  const sheet = openSheet(`
+    <h2>${existing ? "Bearbeiten" : "Neues Buch"}</h2>
+    <div id="dupwarn" class="warnbox ${dup ? "" : "hidden"}">⚠ „<span id="dupt"></span>" ist schon in deiner Liste (${dup ? esc(platformLabel(dup.platform)) + ", " + statusLabel(dup.status) : ""}). Doppeltes Hören vermeiden!</div>
+    <div class="form-row"><label>Titel *</label><input id="f-title" value="${esc(b.title)}"></div>
+    <div class="form-row"><label>Autor</label><input id="f-author" value="${esc(b.author)}"></div>
+    <div class="form-row"><label>Sprecher</label><input id="f-narrator" value="${esc(b.narrator)}"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Serie</label><input id="f-series" value="${esc(b.series)}"></div>
+      <div class="form-row"><label>Teil</label><input id="f-seriesinfo" value="${esc(b.seriesInfo)}"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Plattform</label>
+        <select id="f-platform">${PLATFORMS.map(p => `<option value="${p.id}" ${b.platform === p.id ? "selected" : ""}>${p.label}</option>`).join("")}</select>
+      </div>
+      <div class="form-row"><label>Status</label>
+        <select id="f-status">${STATUSES.map(s => `<option value="${s.id}" ${b.status === s.id ? "selected" : ""}>${s.label}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Beendet am</label><input id="f-finish" type="date" value="${esc(b.finishDate || "")}"></div>
+      <div class="form-row"><label>Länge (min)</label><input id="f-length" type="number" inputmode="numeric" min="0" value="${b.lengthMin || ""}"></div>
+    </div>
+    <div class="form-row"><label>Bewertung</label>
+      <select id="f-rating">${[0, 1, 2, 3, 4, 5].map(n => `<option value="${n}" ${b.rating === n ? "selected" : ""}>${n ? "★".repeat(n) : "– keine –"}</option>`).join("")}</select>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>ISBN</label><input id="f-isbn" inputmode="numeric" value="${esc(b.isbn)}"></div>
+      <div class="form-row"><label>Verlag</label><input id="f-publisher" value="${esc(b.publisher)}"></div>
+    </div>
+    <div class="form-row"><label>Notizen</label><textarea id="f-notes" rows="2">${esc(b.notes)}</textarea></div>
+    ${!existing ? `<div id="coverstatus" style="font-size:12.5px;color:var(--muted);margin-bottom:10px">${b.coverUrl ? "Cover wird geladen…" : "Kein Cover online gefunden – du kannst später in der App danach suchen."}</div>` : ""}
+    <div class="btnrow">
+      ${result && !existing ? `<button class="btn" id="f-reload">🔄 Neu laden</button>` : ""}
+      <button class="btn primary block" id="f-save">💾 Speichern</button>
+    </div>
+  `);
+
+  const titleInput = sheet.querySelector("#f-title");
+  const authorInput = sheet.querySelector("#f-author");
+  const checkDup = async () => {
+    const others = (await allBooks()).filter(o => o.id !== b.id);
+    const d = others.find(o => isDup(o, { title: titleInput.value, author: authorInput.value }));
+    const box = sheet.querySelector("#dupwarn");
+    if (d) {
+      sheet.querySelector("#dupt").textContent = d.title;
+      box.classList.remove("hidden");
+    } else box.classList.add("hidden");
+  };
+  titleInput.addEventListener("blur", checkDup);
+  authorInput.addEventListener("blur", checkDup);
+
+  const reload = sheet.querySelector("#f-reload");
+  if (reload) reload.onclick = async () => {
+    reload.textContent = "⏳";
+    const results = await searchCombined(`${b.title} ${b.author}`.trim());
+    if (results.length) { openBookForm(existing, results[0]); toast("Neu geladen"); }
+    else { reload.textContent = "🔄 Nichts gefunden"; }
+  };
+
+  sheet.querySelector("#f-save").onclick = async () => {
+    b.title = titleInput.value.trim() || b.title;
+    b.author = authorInput.value.trim();
+    b.narrator = sheet.querySelector("#f-narrator").value.trim();
+    b.series = sheet.querySelector("#f-series").value.trim();
+    b.seriesInfo = sheet.querySelector("#f-seriesinfo").value.trim();
+    b.platform = sheet.querySelector("#f-platform").value;
+    b.status = sheet.querySelector("#f-status").value;
+    b.finishDate = sheet.querySelector("#f-finish").value || (b.status === "gehoert" ? b.finishDate : "");
+    b.lengthMin = parseInt(sheet.querySelector("#f-length").value, 10) || 0;
+    b.rating = parseInt(sheet.querySelector("#f-rating").value, 10) || 0;
+    b.isbn = sheet.querySelector("#f-isbn").value.trim().replace(/[^0-9Xx]/g, "");
+    b.publisher = sheet.querySelector("#f-publisher").value.trim();
+    b.notes = sheet.querySelector("#f-notes").value.trim();
+    if (!b.addedDate) b.addedDate = new Date().toISOString().slice(0, 10);
+    await putBook(b);
+    closeSheet();
+    toast("Gespeichert ✓");
+    render();
+    if (result && !existing && !b.hasCover) {
+      fetchAndCacheCover(b);
+    }
+  };
+
+  if (result && !existing) fetchAndCacheCover(b);
+  else if (!existing && b.coverUrl) fetchAndCacheCover(b);
+}
+
+async function fetchAndCacheCover(book) {
+  try {
+    const url = book.coverUrl || await resolveCover(book);
+    if (!url) return;
+    const ok = await storeCover(book.id, url);
+    if (ok) {
+      book.coverUrl = book.coverUrl || url;
+      book.hasCover = true;
+      await putBook(book);
+      if (state.route === "library") render();
+    }
+  } catch {}
+}
+
+async function guessLastPlatform() {
+  const books = await allBooks();
+  const recent = books.filter(b => b.status !== "vormerk").sort((a, b) =>
+    (b.finishDate || "").localeCompare(a.finishDate || ""))[0];
+  return recent?.platform || null;
+}
+
+/* ---------- Cover-/Beschreibungs-Korrektur ---------- */
+
+async function openCoverPicker(book) {
+  const sheet = openSheet(`
+    <h2>Cover korrigieren</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Gefundene Cover für „${esc(book.title)}" – antippen zum Übernehmen.</p>
+    <div id="cp-body">${spinner()}</div>
+    <div class="btnrow">
+      <button class="btn" id="cp-url">🔗 Cover per URL</button>
+      <button class="btn" id="cp-search">🔍 Nochmal suchen</button>
+    </div>
+  `);
+  const body = sheet.querySelector("#cp-body");
+
+  const paint = (urls) => {
+    if (!urls.length) {
+      body.innerHTML = `<div class="empty">Keine Cover gefunden.<br>Tipp: ISBN im Bearbeitungsdialog ergänzen und erneut suchen.</div>`;
+      return;
+    }
+    body.innerHTML = `<div class="covergrid">` + urls.map((u, i) =>
+      `<img class="covercand" data-i="${i}" src="${esc(u)}" loading="lazy" alt="Kandidat ${i + 1}">`).join("") + `</div>`;
+    body.querySelectorAll(".covercand").forEach(img => {
+      img.onerror = () => img.style.opacity = ".25";
+      img.onclick = async () => {
+        const url = urls[parseInt(img.dataset.i, 10)];
+        img.style.outline = "3px solid var(--accent)";
+        const ok = await storeCover(book.id, url);
+        if (ok) {
+          book.hasCover = true;
+          book.coverUrl = url;
+          await putBook(book);
+          closeSheet();
+          toast("Cover übernommen ✓");
+          render();
+        } else {
+          toast("Cover konnte nicht geladen werden");
+          img.style.outline = "";
+        }
+      };
+    });
+  };
+
+  paint(await coverCandidates(book));
+
+  sheet.querySelector("#cp-search").onclick = async (e) => {
+    e.target.textContent = "⏳";
+    const fresh = await coverCandidates(book);
+    paint(fresh);
+    e.target.textContent = "🔍 Nochmal suchen";
+  };
+  sheet.querySelector("#cp-url").onclick = () => {
+    const url = prompt("Cover-URL (https://…):");
+    if (url && url.startsWith("http")) {
+      storeCover(book.id, url).then(async ok => {
+        if (ok) {
+          book.hasCover = true;
+          book.coverUrl = url;
+          await putBook(book);
+          closeSheet();
+          toast("Cover übernommen ✓");
+          render();
+        } else toast("URL konnte nicht geladen werden");
+      });
+    }
+  };
+}
+
+async function openDescriptionEditor(book) {
+  const sheet = openSheet(`
+    <h2>Beschreibung</h2>
+    <div class="form-row"><textarea id="de-text" rows="8" placeholder="Beschreibung…">${esc(book.description || "")}</textarea></div>
+    <div class="btnrow">
+      <button class="btn" id="de-load">🔍 Online nachladen</button>
+      <button class="btn primary" id="de-save">💾 Speichern</button>
+    </div>
+    <div id="de-cands"></div>
+  `);
+  const text = sheet.querySelector("#de-text");
+  const cands = sheet.querySelector("#de-cands");
+
+  sheet.querySelector("#de-save").onclick = async () => {
+    book.description = text.value.trim();
+    await putBook(book);
+    closeSheet();
+    toast("Beschreibung gespeichert ✓");
+    render();
+  };
+  sheet.querySelector("#de-load").onclick = async (e) => {
+    e.target.textContent = "⏳ Lädt…";
+    const list = await descriptionCandidates(book);
+    e.target.textContent = "🔍 Online nachladen";
+    if (!list.length) {
+      cands.innerHTML = `<div class="empty" style="padding:20px">Nichts gefunden – ISBN prüfen oder manuell eingeben.</div>`;
+      return;
+    }
+    cands.innerHTML = `<div class="grouphead">Gefundene Texte – übernehmen:</div>` + list.map((c, i) => `
+      <div class="resultcard" style="align-items:flex-start">
+        <div class="bookinfo">
+          <div class="a" style="margin-bottom:4px">Quelle: ${esc(c.src)}</div>
+          <div style="font-size:13.5px;line-height:1.45">${esc(c.text.slice(0, 600))}${c.text.length > 600 ? "…" : ""}</div>
+        </div>
+        <button class="minibtn" data-i="${i}">✓</button>
+      </div>`).join("");
+    cands.querySelectorAll(".minibtn").forEach(btn => {
+      btn.onclick = () => {
+        text.value = list[parseInt(btn.dataset.i, 10)].text;
+        text.scrollIntoView({ behavior: "smooth", block: "center" });
+      };
+    });
+  };
+}
+
+/* ---------- Automatisches Anreichern nach Import ---------- */
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function enrichBooks(books) {
+  let covers = 0, descs = 0;
+  const needCover = books.filter(b => !b.hasCover);
+  const needDesc = books.filter(b => !b.description && b.isbn);
+  for (const b of needCover) {
+    try {
+      const urls = await coverCandidates(b);
+      for (const u of urls) {
+        if (await storeCover(b.id, u)) {
+          b.hasCover = true;
+          b.coverUrl = u;
+          covers++;
+          break;
+        }
+      }
+    } catch {}
+    await sleep(250);
+  }
+  for (const b of needDesc) {
+    try {
+      const meta = await fetchIsbnMetadata(b.isbn);
+      if (meta?.description) {
+        b.description = meta.description.trim();
+        if (meta.publisher && !b.publisher) b.publisher = meta.publisher;
+        descs++;
+      }
+    } catch {}
+    await sleep(400);
+  }
+  if (covers || descs) {
+    await bulkPut(books);
+    toast(`Nachgeladen: ${covers} Cover, ${descs} Beschreibungen`);
+    if (state.route === "library" || state.route === "stats") render();
+  }
+  return { covers, descs };
+}
+
+/* ---------- Einstellungen ---------- */
+
+async function renderSettings(view) {
+  const books = await allBooks();
+  view.innerHTML = `
+    <h2 style="font-size:16px;margin:6px 0 2px">Import / Export</h2>
+    <div class="setrow">
+      <div><div class="l">CSV importieren (Openreads / Bookmori)</div><div class="s">CSV-Datei auswählen – Format wird automatisch erkannt</div></div>
+      <button class="btn" id="s-import">📥</button>
+    </div>
+    <div class="setrow">
+      <div><div class="l">Als Openreads CSV exportieren</div><div class="s">${books.length} Bücher – inkl. Plattform &amp; Länge</div></div>
+      <button class="btn" id="s-export-csv">📤</button>
+    </div>
+    <div class="setrow">
+      <div><div class="l">Backup (JSON) exportieren</div><div class="s">Komplette Sicherung inkl. aller Daten</div></div>
+      <button class="btn" id="s-export-json">📤</button>
+    </div>
+    <div class="setrow">
+      <div><div class="l">Backup (JSON) importieren</div><div class="s">Daten aus einer AudioCron-Sicherung wiederherstellen</div></div>
+      <button class="btn" id="s-import-json">📥</button>
+    </div>
+
+    <h2 style="font-size:16px;margin:22px 0 2px">Covers &amp; Beschreibungen</h2>
+    <div class="setrow">
+      <div><div class="l">Fehlende Covers &amp; Beschreibungen nachladen</div><div class="s">Versucht pro Buch per ISBN/OLID ein Bild und einen Text zu finden</div></div>
+      <button class="btn" id="s-covers">🖼</button>
+    </div>
+
+    <h2 style="font-size:16px;margin:22px 0 2px">Daten</h2>
+    <div class="setrow">
+      <div><div class="l">Alle Daten löschen</div><div class="s">Unwiderruflich – erst Export nutzen!</div></div>
+      <button class="btn danger" id="s-clear">🗑</button>
+    </div>
+    <div style="color:var(--muted);font-size:12px;margin-top:24px;text-align:center">
+      AudioCron v${APP_VERSION} · Offline-PWA · Daten bleiben nur auf diesem Gerät<br>
+      <span id="install-info"></span>
+    </div>
+    <input type="file" id="file-csv" accept=".csv,text/csv" class="hidden">
+    <input type="file" id="file-json" accept=".json,application/json" class="hidden">
+  `;
+
+  const fileCsv = view.querySelector("#file-csv");
+  const fileJson = view.querySelector("#file-json");
+
+  view.querySelector("#s-import").onclick = () => fileCsv.click();
+  fileCsv.onchange = async () => {
+    const file = fileCsv.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const result = importOpenreadsCsv(text);
+      const imported = result.books;
+      if (!imported.length) { toast("Keine Bücher in der CSV gefunden"); return; }
+      const existing = await allBooks();
+      let skippedDup = 0;
+      const fresh = imported.filter(nb => {
+        const d = existing.find(o => isDup(o, nb));
+        if (d) { skippedDup++; return false; }
+        return true;
+      });
+      await bulkPut(fresh);
+      toast(`${fresh.length} importiert${skippedDup ? `, ${skippedDup} Duplikate übersprungen` : ""}${result.skipped ? `, ${result.skipped} gelöscht-Flags übersprungen` : ""}`);
+      render();
+      enrichBooks(fresh);
+    } catch (e) {
+      toast("Import fehlgeschlagen: " + e.message);
+    }
+    fileCsv.value = "";
+  };
+
+  view.querySelector("#s-export-csv").onclick = async () => {
+    const all = await allBooks();
+    if (!all.length) { toast("Keine Daten"); return; }
+    download(`AudioCron-openreads-${new Date().toISOString().slice(0, 10)}.csv`,
+      exportOpenreadsCsv(all), "text/csv;charset=utf-8");
+  };
+
+  view.querySelector("#s-export-json").onclick = async () => {
+    const all = await allBooks();
+    download(`AudioCron-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      exportJson(all), "application/json");
+  };
+
+  view.querySelector("#s-import-json").onclick = () => fileJson.click();
+  fileJson.onchange = async () => {
+    const file = fileJson.files[0];
+    if (!file) return;
+    try {
+      const list = importJson(await file.text());
+      await bulkPut(list);
+      toast(`${list.length} Bücher wiederhergestellt`);
+      render();
+    } catch (e) {
+      toast("Import fehlgeschlagen: " + e.message);
+    }
+    fileJson.value = "";
+  };
+
+  view.querySelector("#s-covers").onclick = async (e) => {
+    const all = await allBooks();
+    const missing = all.filter(b => !b.hasCover || (!b.description && b.isbn));
+    if (!missing.length) { toast("Alle Bücher haben Cover & Beschreibung"); return; }
+    e.target.textContent = "⏳";
+    const { covers, descs } = await enrichBooks(missing);
+    if (!covers && !descs) toast("Online nichts neues gefunden");
+    render();
+  };
+
+  view.querySelector("#s-clear").onclick = async () => {
+    if (!confirm("ALLE Bücher und Covers wirklich löschen?")) return;
+    if (!confirm("Wirklich? Das kann nicht rückgängig gemacht werden.")) return;
+    await clearAll();
+    toast("Alle Daten gelöscht");
+    render();
+  };
+
+  if (deferredPrompt) {
+    view.querySelector("#install-info").innerHTML =
+      `<span class="linklike" id="do-install">App auf Startbildschirm installieren</span>`;
+    document.getElementById("do-install").onclick = installApp;
+  }
+}
+
+/* ---------- PWA Install + Service Worker ---------- */
+
+let deferredPrompt = null;
+window.addEventListener("beforeinstallprompt", e => {
+  e.preventDefault();
+  deferredPrompt = e;
+});
+async function installApp() {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice;
+  deferredPrompt = null;
+}
+
+if ("serviceWorker" in navigator) {
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloaded) return;
+    reloaded = true;
+    location.reload();
+  });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" })
+      .then(reg => {
+        reg.update();
+        setInterval(() => reg.update(), 60 * 60 * 1000);
+      })
+      .catch(err => console.warn("SW-Registrierung fehlgeschlagen", err));
+  });
+}
+
+/* ---------- Init ---------- */
+
+document.getElementById("bottomnav").addEventListener("click", e => {
+  const btn = e.target.closest(".nav-btn");
+  if (btn) navigate(btn.dataset.route);
+});
+document.getElementById("fab").addEventListener("click", openAddMenu);
+
+render();
