@@ -59,12 +59,12 @@ async function renderLibrary(view) {
       <input id="q" type="search" placeholder="Titel, Autor, Sprecher suchen…" value="${esc(state.query)}">
     </div>
     <div class="chiprow" id="f-platform">
-      <button class="chip ${state.platform === "alle" ? "active" : ""}" data-platform="alle">Alle</button>
-      ${PLATFORMS.map(p => `<button class="chip ${state.platform === p.id ? "active" : ""}" data-platform="${p.id}">${p.label}</button>`).join("")}
+      <button class="chip ${state.platform === "alle" ? "active" : ""}" data-platform="alle">Alle <span class="cnt"></span></button>
+      ${PLATFORMS.map(p => `<button class="chip ${state.platform === p.id ? "active" : ""}" data-platform="${p.id}">${p.label} <span class="cnt"></span></button>`).join("")}
     </div>
     <div class="chiprow" id="f-status">
-      <button class="chip ${state.status === "alle" ? "active" : ""}" data-status="alle">Alle Status</button>
-      ${STATUSES.map(s => `<button class="chip ${state.status === s.id ? "active" : ""}" data-status="${s.id}">${s.label}</button>`).join("")}
+      <button class="chip ${state.status === "alle" ? "active" : ""}" data-status="alle">Alle Status <span class="cnt"></span></button>
+      ${STATUSES.map(s => `<button class="chip ${state.status === s.id ? "active" : ""}" data-status="${s.id}">${s.label} <span class="cnt"></span></button>`).join("")}
     </div>
     <div class="searchbar">
       <select id="sort">
@@ -98,15 +98,18 @@ async function renderLibrary(view) {
   paintList(books);
 }
 
+function matchesQuery(b, q) {
+  if (!q) return true;
+  const hay = norm([b.title, b.author, b.narrator, b.series].join(" "));
+  return q.split(" ").every(t => hay.includes(t));
+}
+
 function filtered(books) {
   const q = norm(state.query);
   let list = books.filter(b => {
     if (state.platform !== "alle" && b.platform !== state.platform) return false;
     if (state.status !== "alle" && b.status !== state.status) return false;
-    if (q) {
-      const hay = norm([b.title, b.author, b.narrator, b.series].join(" "));
-      if (!q.split(" ").every(t => hay.includes(t))) return false;
-    }
+    if (!matchesQuery(b, q)) return false;
     return true;
   });
   const by = {
@@ -119,7 +122,28 @@ function filtered(books) {
   return list;
 }
 
+function updateChipCounts(books) {
+  const q = norm(state.query);
+  const byStatus = books.filter(b => state.status === "alle" || b.status === state.status);
+  const byPlatform = books.filter(b => state.platform === "alle" || b.platform === state.platform);
+  const set = (selector, n) => {
+    const el = document.querySelector(selector);
+    if (el) el.textContent = n;
+  };
+  set('#f-platform [data-platform="alle"] .cnt', byStatus.filter(b => matchesQuery(b, q)).length);
+  for (const p of PLATFORMS) {
+    set(`#f-platform [data-platform="${p.id}"] .cnt`,
+      byStatus.filter(b => b.platform === p.id && matchesQuery(b, q)).length);
+  }
+  set('#f-status [data-status="alle"] .cnt', byPlatform.filter(b => matchesQuery(b, q)).length);
+  for (const s of STATUSES) {
+    set(`#f-status [data-status="${s.id}"] .cnt`,
+      byPlatform.filter(b => b.status === s.id && matchesQuery(b, q)).length);
+  }
+}
+
 async function paintList(books) {
+  updateChipCounts(books);
   const list = filtered(books);
   const el = document.getElementById("list");
   if (!list.length) {
@@ -145,7 +169,7 @@ async function paintList(books) {
           <div class="a">${esc(b.author)}${b.narrator ? ` · <span style="font-style:italic">${esc(b.narrator)}</span>` : ""}</div>
           <div class="bookmeta">
             <span class="badge ${b.platform}">${esc(platformLabel(b.platform))}</span>
-            <span class="badge ${b.status}">${esc(statusLabel(b.status))}</span>
+            <span class="badge ${b.status} tappable" data-cycle="${b.id}" title="Status wechseln">${esc(statusLabel(b.status))} ⟳</span>
             ${b.lengthMin ? `<span style="color:var(--muted);font-size:11.5px">${fmtHours(b.lengthMin)}</span>` : ""}
             ${b.status === "gehoert" && b.finishDate ? `<span style="color:var(--muted);font-size:11.5px">${fmtDate(b.finishDate)}</span>` : ""}
             ${stars(b.rating)}
@@ -153,10 +177,36 @@ async function paintList(books) {
         </div>
       </div>`;
   }
-  el.innerHTML = html;
+  el.innerHTML = `<div class="listcount">${list.length} ${list.length === 1 ? "Hörbuch" : "Hörbücher"}</div>` + html;
   hydrateCovers(el);
   el.querySelectorAll(".bookcard").forEach(c =>
     c.addEventListener("click", () => openDetail(c.dataset.id)));
+  el.querySelectorAll(".badge.tappable").forEach(badge => {
+    badge.addEventListener("click", async e => {
+      e.stopPropagation();
+      await cycleStatus(badge.dataset.cycle, badge);
+    });
+  });
+}
+
+async function cycleStatus(id, badgeEl) {
+  const b = await getBook(id);
+  if (!b) return;
+  const idx = STATUSES.findIndex(s => s.id === b.status);
+  const next = STATUSES[(idx + 1) % STATUSES.length];
+  b.status = next.id;
+  if (next.id === "gehoert" && !b.finishDate) {
+    b.finishDate = new Date().toISOString().slice(0, 10);
+  }
+  await putBook(b);
+  if (badgeEl) {
+    badgeEl.className = `badge ${b.status} tappable`;
+    badgeEl.textContent = `${statusLabel(b.status)} ⟳`;
+  }
+  toast(`Status: ${next.label}`);
+  if (state.route !== "library") return;
+  if (state.status !== "alle" && state.status !== next.id) render();
+  else updateChipCounts(await allBooks());
 }
 
 /* ---------- Detail ---------- */
@@ -174,7 +224,9 @@ export async function openDetail(id) {
         <div style="font-size:13px;color:var(--muted)">${esc(b.author)}</div>
         <div class="bookmeta" style="margin-top:8px">
           <span class="badge ${b.platform}">${esc(platformLabel(b.platform))}</span>
-          <span class="badge ${b.status}">${esc(statusLabel(b.status))}</span>
+        </div>
+        <div class="chiprow" id="d-status" style="margin-top:8px;padding-bottom:0">
+          ${STATUSES.map(s => `<button class="chip ${b.status === s.id ? "active" : ""}" data-status="${s.id}">${s.label}</button>`).join("")}
         </div>
         ${dupes.length ? `<div class="warnbox" style="margin-top:10px;font-size:12.5px">⚠ Kommt ${dupes.length}× weiter in deiner Liste vor (${esc(dupes[0].platform)}) – ggf. doppelt.</div>` : ""}
       </div>
@@ -201,6 +253,20 @@ export async function openDetail(id) {
     </div>
   `);
   sheet.querySelector("#d-desc-edit").onclick = () => openDescriptionEditor(b);
+  sheet.querySelectorAll("#d-status .chip").forEach(ch => {
+    ch.onclick = async () => {
+      if (b.status === ch.dataset.status) return;
+      b.status = ch.dataset.status;
+      if (b.status === "gehoert" && !b.finishDate) {
+        b.finishDate = new Date().toISOString().slice(0, 10);
+      }
+      await putBook(b);
+      sheet.querySelectorAll("#d-status .chip").forEach(c =>
+        c.classList.toggle("active", c === ch));
+      toast(`Status: ${statusLabel(b.status)}`);
+      render();
+    };
+  });
   sheet.querySelector("#d-cover").onclick = () => openCoverPicker(b);
   sheet.querySelector("#d-edit").onclick = () => { closeSheet(); openBookForm(b); };
   sheet.querySelector("#d-del").onclick = async () => {
@@ -322,9 +388,9 @@ export async function openBookForm(existing, result = null) {
     series: result?.series || "",
     seriesInfo: "",
     platform: (await guessLastPlatform()) || "bookbeat",
-    status: "gehoert",
-    finishDate: new Date().toISOString().slice(0, 10),
-    startDate: "",
+    status: "hoere",
+    finishDate: "",
+    startDate: new Date().toISOString().slice(0, 10),
     addedDate: new Date().toISOString().slice(0, 10),
     lengthMin: 0,
     pages: 0,
@@ -411,7 +477,8 @@ export async function openBookForm(existing, result = null) {
     b.seriesInfo = sheet.querySelector("#f-seriesinfo").value.trim();
     b.platform = sheet.querySelector("#f-platform").value;
     b.status = sheet.querySelector("#f-status").value;
-    b.finishDate = sheet.querySelector("#f-finish").value || (b.status === "gehoert" ? b.finishDate : "");
+    b.finishDate = sheet.querySelector("#f-finish").value
+      || (b.status === "gehoert" ? (b.finishDate || new Date().toISOString().slice(0, 10)) : "");
     b.lengthMin = parseInt(sheet.querySelector("#f-length").value, 10) || 0;
     b.rating = parseInt(sheet.querySelector("#f-rating").value, 10) || 0;
     b.isbn = sheet.querySelector("#f-isbn").value.trim().replace(/[^0-9Xx]/g, "");

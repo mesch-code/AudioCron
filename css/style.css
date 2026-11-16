@@ -69,6 +69,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); bo
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .chip.active[data-platform="bookbeat"] { background: var(--bb); border-color: var(--bb); }
 .chip.active[data-platform="borrowbox"] { background: var(--bx); border-color: var(--bx); color: #08333a; }
+.chip .cnt { opacity: .7; font-size: 11.5px; margin-left: 2px; }
+.chip.active .cnt { opacity: .85; }
+.listcount { color: var(--muted); font-size: 12px; margin: 2px 2px 8px; }
 
 /* Bücherliste */
 .booklist { display: flex; flex-direction: column; gap: 8px; }
@@ -92,6 +95,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); bo
 .badge.gehoert { background: rgba(62,207,142,.16); color: var(--green); }
 .badge.hoere { background: rgba(255,180,84,.16); color: var(--orange); }
 .badge.vormerk { background: rgba(79,140,255,.16); color: var(--accent); }
+.badge.tappable { cursor: pointer; border: 1px dashed currentColor; -webkit-tap-highlight-color: transparent; }
 .stars { color: #ffce54; font-size: 12px; letter-spacing: 1px; }
 .grouphead { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; margin: 14px 2px 6px; }
 
