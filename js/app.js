@@ -431,6 +431,9 @@ export async function openDetail(id) {
     </div>
     <div class="descbox ${b.description ? "" : "empty-desc"}">${b.description ? esc(b.description) : 'Keine Beschreibung vorhanden – über „nachladen“ per ISBN/Titel suchen.'}</div>
     ${b.notes ? row("Notizen", esc(b.notes)) : ""}
+    <div style="margin-top:10px">
+      <a class="linklike" href="${esc(googleSearchUrl(b))}" target="_blank" rel="noopener noreferrer">🔍 Bei Google suchen</a>
+    </div>
     <div class="btnrow" style="margin-top:16px">
       <button class="btn" id="d-cover">🖼 Cover korrigieren</button>
       <button class="btn primary" id="d-edit">✏️ Bearbeiten</button>
@@ -465,6 +468,11 @@ export async function openDetail(id) {
 
 function row(k, v) {
   return `<div class="detail-field"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+}
+
+function googleSearchUrl(b) {
+  const q = [`"${b.title || ""}"`, b.author ? `"${b.author}"` : ""].filter(Boolean).join(" ").trim();
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
 
 /* ---------- Hinzufügen ---------- */
