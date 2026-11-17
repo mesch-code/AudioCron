@@ -740,9 +740,11 @@ async function openCoverPicker(book) {
   `);
   const body = sheet.querySelector("#cp-body");
 
-  const paint = (urls) => {
+  const paint = (urls, done) => {
     if (!urls.length) {
-      body.innerHTML = `<div class="empty">Keine Cover gefunden.<br>Tipp: ISBN im Bearbeitungsdialog ergänzen und erneut suchen.</div>`;
+      if (done) {
+        body.innerHTML = `<div class="empty">Keine Cover gefunden.<br>Tipp: ISBN im Bearbeitungsdialog ergänzen, "Nochmal suchen" nutzen oder Cover-URL einfügen.</div>`;
+      }
       return;
     }
     body.innerHTML = `<div class="covergrid">` + urls.map((u, i) =>
@@ -768,12 +770,18 @@ async function openCoverPicker(book) {
     });
   };
 
-  paint(await coverCandidates(book));
+  const found = [];
+  const onFound = (urls) => {
+    for (const u of urls) if (!found.includes(u)) found.push(u);
+    paint(found, false);
+  };
+  coverCandidates(book, onFound).then(() => paint(found, true));
 
   sheet.querySelector("#cp-search").onclick = async (e) => {
     e.target.textContent = "⏳";
-    const fresh = await coverCandidates(book);
-    paint(fresh);
+    found.length = 0;
+    await coverCandidates(book, onFound);
+    paint(found, true);
     e.target.textContent = "🔍 Nochmal suchen";
   };
   sheet.querySelector("#cp-url").onclick = async () => {

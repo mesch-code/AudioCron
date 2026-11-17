@@ -254,6 +254,82 @@ export async function searchDnb(query, limit = 12) {
   }
 }
 
+function isbn10From13(isbn) {
+  const s = String(isbn || "").replace(/[^0-9]/g, "");
+  if (s.length !== 13 || (!s.startsWith("978") && !s.startsWith("979"))) return "";
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += (s.charCodeAt(3 + i) - 48) * (10 - i);
+  const c = (11 - (sum % 11)) % 11;
+  return s.slice(3, 12) + (c === 10 ? "X" : String(c));
+}
+
+/* Alt-Bildendpoint von Amazon: CORS-fähig, ohne API-Key, über ISBN-10 */
+function amazonPUrls(isbn) {
+  const s = String(isbn || "").replace(/[^0-9Xx]/g, "");
+  let ten = "";
+  if (s.length === 13) ten = isbn10From13(s);
+  else if (/^\d{9}[\dXx]$/.test(s)) ten = s.toUpperCase();
+  if (!ten) return [];
+  return [`https://m.media-amazon.com/images/P/${ten}.01._SCRM_SCLZZZZZZZ_V1_.jpg`];
+}
+
+/* OL und Amazon liefern auf unbekannte ISBN eine 43-byte-Platzhalter-GIF mit 200 */
+async function isLiveImage(url, minBytes = 1500) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return false;
+    const blob = await res.blob();
+    return blob.type.startsWith("image") && blob.size >= minBytes;
+  } catch {
+    return false;
+  }
+}
+
+async function filterLive(urls, minBytes = 1500) {
+  const flags = await Promise.all(urls.map(u => isLiveImage(u, minBytes)));
+  return urls.filter((_, i) => flags[i]);
+}
+
+async function wikipediaCoverUrl(book) {
+  const q = [book.title, book.author].filter(Boolean).join(" ").trim();
+  if (!q) return null;
+  try {
+    const res = await fetch(
+      `https://de.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=search` +
+      `&gsrsearch=${encodeURIComponent(q)}&gsrlimit=5&prop=pageimages&piprop=thumbnail&pithumbsize=600`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pages = Object.values(data?.query?.pages || {})
+      .sort((a, b) => (a.index ?? 99) - (b.index ?? 99));
+    const wantTokens = norm(book.title).split(" ").filter(t => t.length >= 3);
+    if (!wantTokens.length) return null;
+    for (const p of pages) {
+      const pt = norm(p.title);
+      if (wantTokens.every(t => pt.includes(t)) && p.thumbnail?.source) {
+        return p.thumbnail.source;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function gbVolumesUrl(query) {
+  return `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10&country=DE&hl=de`;
+}
+
+function coverQueryVariants(book) {
+  const full = norm([book.title, book.author].filter(Boolean).join(" "));
+  const out = [];
+  const push = (v) => { if (v && v !== full && !out.includes(v)) out.push(v); };
+  push(stripFillers(full));
+  push(norm(book.title));
+  const tw = norm(book.title).split(" ");
+  if (tw.length >= 4) push(tw.slice(0, 3).join(" "));
+  return out.slice(0, 3);
+}
+
 const SOURCE_DEFS = {
   dnb: "Deutsche Nationalbibliothek",
   lobid: "lobid / SWB-Verbundkatalog",
@@ -346,15 +422,19 @@ export async function coverForIsbn(isbn, title, author) {
     const gb = await gbSearch(
       `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(clean)}&maxResults=1&country=DE&hl=de`);
     if (gb[0]?.coverUrl) return gb[0].coverUrl;
+    for (const u of amazonPUrls(clean)) {
+      if (await isLiveImage(u)) return u;
+    }
   }
   const t = (title || "").trim();
   const a = (author || "").trim();
   if (t) {
-    const byTitle = await olCoverByQuery(a ? `${t} ${a}` : t);
-    if (byTitle) return byTitle;
-    if (a) {
-      const byTitleOnly = await olCoverByQuery(t);
-      if (byTitleOnly) return byTitleOnly;
+    const tried = new Set();
+    for (const q of [a ? `${t} ${a}` : t, stripFillers(a ? `${t} ${a}` : ""), t]) {
+      if (!q || tried.has(q)) continue;
+      tried.add(q);
+      const byTitle = await olCoverByQuery(q);
+      if (byTitle) return byTitle;
     }
   }
   return null;
@@ -462,17 +542,14 @@ export async function resolveCover(result) {
   const candidates = [];
   if (result.isbn13) candidates.push(`https://covers.openlibrary.org/b/isbn/${result.isbn13}-M.jpg`);
   if (result.coverUrl) candidates.push(result.coverUrl);
+  amazonPUrls(result.isbn13).forEach(u => candidates.push(u));
   if (result.title && result.author) {
     candidates.push(`https://covers.openlibrary.org/b/query/${encodeURIComponent(result.title)}_${encodeURIComponent(result.author)}-M.jpg`);
   }
+  const wiki = await wikipediaCoverUrl(result);
+  if (wiki) candidates.push(wiki);
   for (const url of candidates) {
-    try {
-      const res = await fetch(url, { method: "GET" });
-      if (res.ok) {
-        const blob = await res.blob();
-        if (blob.type.startsWith("image") && blob.size > 1200) return url;
-      }
-    } catch {}
+    if (await isLiveImage(url, 1200)) return url;
   }
   return null;
 }
@@ -549,7 +626,7 @@ export async function fetchIsbnMetadata(isbn) {
   ]);
   const coverCandidates = [];
   const seen = new Set();
-  for (const u of [ol?.coverUrl, ...(gb?.coverUrls || [])]) {
+  for (const u of [ol?.coverUrl, ...(gb?.coverUrls || []), ...amazonPUrls(isbn)]) {
     if (u && !seen.has(u)) { seen.add(u); coverCandidates.push(u); }
   }
   const olDesc = ol?.description?.trim() || null;
@@ -565,37 +642,87 @@ export async function fetchIsbnMetadata(isbn) {
   };
 }
 
-export async function coverCandidates(book) {
-  const urls = [];
+export async function coverCandidates(book, onFound = null) {
   const seen = new Set();
+  const raw = [];
   const add = (u) => {
-    if (u && !seen.has(u)) { seen.add(u); urls.push(u); }
+    if (u && !seen.has(u)) { seen.add(u); raw.push(u); }
   };
+  const addFromResults = (results) => {
+    let n = 0;
+    for (const r of results) {
+      if (n >= 6) break;
+      if (r.coverUrl) { add(r.coverUrl); n++; continue; }
+      if (r.isbn13) {
+        add(`https://covers.openlibrary.org/b/isbn/${r.isbn13}-M.jpg`);
+        amazonPUrls(r.isbn13).forEach(add);
+        n++;
+      }
+    }
+  };
+
   add(olCoverUrlFor(book));
   if (book.isbn) {
     add(`https://covers.openlibrary.org/b/isbn/${book.isbn}-M.jpg`);
-    const byIsbn = await searchBooks(book.isbn, { isbn: true });
-    for (const r of byIsbn) add(r.coverUrl);
+    amazonPUrls(book.isbn).forEach(add);
   }
-  const q = [book.title, book.author].filter(Boolean).join(" ");
-  if (q) {
-    const results = await searchBooks(q);
-    const want = norm(book.title);
-    const sorted = [...results].sort((a, b) => {
-      const am = a.isbn13 === book.isbn ? 0 : (norm(a.title) === want ? 1 : 2);
-      const bm = b.isbn13 === book.isbn ? 0 : (norm(b.title) === want ? 1 : 2);
-      return am - bm;
-    });
-    for (const r of sorted.slice(0, 10)) {
-      add(r.coverUrl);
-      if (r.isbn13) add(`https://covers.openlibrary.org/b/isbn/${r.isbn13}-M.jpg`);
+
+  const t = String(book.title || "").replace(/"/g, "").trim();
+  const a = String(book.author || "").replace(/"/g, "").trim();
+  const q = [t, a].filter(Boolean).join(" ");
+  const want = norm(t);
+
+  const gbOps = [];
+  if (t && a) gbOps.push(`intitle:"${t}" inauthor:"${a}"`);
+  if (t) gbOps.push(`intitle:"${t}"`);
+
+  const [olRes, gbRes, gbOpLists, wikiUrl, meta] = await Promise.all([
+    q ? searchBooks(q) : Promise.resolve([]),
+    q ? searchGermanAudiobooks(q) : Promise.resolve([]),
+    Promise.all(gbOps.map(gq => gbSearch(gbVolumesUrl(gq)))),
+    wikipediaCoverUrl(book),
+    book.isbn ? fetchIsbnMetadata(book.isbn).catch(() => null) : Promise.resolve(null)
+  ]);
+
+  const sorted = [...olRes].sort((x, y) => {
+    const sx = x.isbn13 === book.isbn ? 0 : (norm(x.title) === want ? 1 : 2);
+    const sy = y.isbn13 === book.isbn ? 0 : (norm(y.title) === want ? 1 : 2);
+    return sx - sy;
+  });
+  addFromResults(sorted);
+  for (const r of [...gbRes, ...gbOpLists.flat()].slice(0, 12)) add(r.coverUrl);
+  add(wikiUrl);
+  meta?.coverCandidates?.forEach(add);
+
+  let out = await filterLive(raw);
+  if (onFound && out.length) onFound(out);
+
+  const surname = norm(book.author).split(" ").pop() || "";
+  const relevant = (r) => {
+    const pt = norm(r.title);
+    const titleOk = pt === want || (want.length >= 4 && (pt.includes(want) || want.includes(pt)));
+    if (!titleOk) return false;
+    if (!surname) return true;
+    const ra = norm(r.author);
+    if (!ra) return true;
+    const otherSurname = ra.split(" ").pop();
+    return ra.includes(surname) || surname.includes(otherSurname);
+  };
+
+  for (const vq of coverQueryVariants(book)) {
+    if (out.length >= 3) break;
+    const start = raw.length;
+    const [res, gbr] = await Promise.all([searchBooks(vq), gbSearch(gbVolumesUrl(vq))]);
+    addFromResults(res.filter(relevant));
+    for (const r of gbr.filter(relevant).slice(0, 8)) add(r.coverUrl);
+    const fresh = raw.slice(start);
+    if (fresh.length) {
+      const more = await filterLive(fresh);
+      out = out.concat(more);
+      if (onFound && more.length) onFound(more);
     }
-    const gb = await searchGermanAudiobooks(q);
-    for (const r of gb.slice(0, 10)) add(r.coverUrl);
   }
-  const meta = book.isbn ? await fetchIsbnMetadata(book.isbn) : null;
-  meta?.coverCandidates.forEach(add);
-  return urls;
+  return out.slice(0, 12);
 }
 
 export async function descriptionCandidates(book) {
