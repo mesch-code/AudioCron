@@ -263,6 +263,24 @@ function isbn10From13(isbn) {
   return s.slice(3, 12) + (c === 10 ? "X" : String(c));
 }
 
+function isbnVariants(isbn) {
+  const s = String(isbn || "").replace(/[^0-9Xx]/g, "").toUpperCase();
+  const out = [];
+  const push = (v) => { if (v && !out.includes(v)) out.push(v); };
+  if (/^(978|979)\d{10}$/.test(s)) {
+    push(s);
+    const ten = isbn10From13(s);
+    if (ten) push(ten);
+  } else if (/^\d{9}[\dX]$/.test(s)) {
+    push(s);
+    const body = s.slice(0, 9);
+    const sum = 3 * body.split("").reduce((a, d, i) => a + (d.charCodeAt(0) - 48) * (i % 2 ? 3 : 1), 0);
+    const c = (10 - (sum % 10)) % 10;
+    push("978" + body + String(c));
+  }
+  return out;
+}
+
 /* Alt-Bildendpoint von Amazon: CORS-fähig, ohne API-Key, über ISBN-10 */
 function amazonPUrls(isbn) {
   const s = String(isbn || "").replace(/[^0-9Xx]/g, "");
@@ -662,9 +680,10 @@ export async function coverCandidates(book, onFound = null) {
   };
 
   add(olCoverUrlFor(book));
-  if (book.isbn) {
-    add(`https://covers.openlibrary.org/b/isbn/${book.isbn}-M.jpg`);
-    amazonPUrls(book.isbn).forEach(add);
+  const isbnVars = isbnVariants(book.isbn);
+  for (const iv of isbnVars) {
+    add(`https://covers.openlibrary.org/b/isbn/${iv}-M.jpg`);
+    amazonPUrls(iv).forEach(add);
   }
 
   const t = String(book.title || "").replace(/"/g, "").trim();
@@ -672,7 +691,7 @@ export async function coverCandidates(book, onFound = null) {
   const q = [t, a].filter(Boolean).join(" ");
   const want = norm(t);
 
-  const gbOps = [];
+  const gbOps = isbnVars.map(iv => `isbn:${iv}`);
   if (t && a) gbOps.push(`intitle:"${t}" inauthor:"${a}"`);
   if (t) gbOps.push(`intitle:"${t}"`);
 

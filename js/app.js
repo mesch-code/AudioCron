@@ -470,9 +470,9 @@ function row(k, v) {
   return `<div class="detail-field"><span class="k">${k}</span><span class="v">${v}</span></div>`;
 }
 
-function googleSearchUrl(b) {
-  const q = [`"${b.title || ""}"`, b.author ? `"${b.author}"` : ""].filter(Boolean).join(" ").trim();
-  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+function googleSearchUrl(b, images = false) {
+  const q = [`"${b.title || ""}"`, b.author ? `"${b.author}"` : "", b.isbn || ""].filter(Boolean).join(" ").trim();
+  return `https://www.google.com/search?${images ? "tbm=isch&" : ""}q=${encodeURIComponent(q)}`;
 }
 
 /* ---------- Hinzufügen ---------- */
@@ -742,6 +742,7 @@ async function openCoverPicker(book) {
     <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Gefundene Cover für „${esc(book.title)}" – antippen zum Übernehmen.</p>
     <div id="cp-body">${spinner()}</div>
     <div class="btnrow">
+      <a class="btn" href="${esc(googleSearchUrl(book, true))}" target="_blank" rel="noopener noreferrer" style="text-decoration:none">🖼 Bei Google suchen</a>
       <button class="btn" id="cp-url">🔗 Cover per URL</button>
       <button class="btn" id="cp-search">🔍 Nochmal suchen</button>
     </div>
