@@ -1,4 +1,4 @@
-﻿const VERSION = "AudioCron-v0.8.2";
+﻿const VERSION = "AudioCron-v0.8.3";
 const SHELL_CACHE = VERSION + "-shell";
 const COVER_CACHE = VERSION + "-covers";
 

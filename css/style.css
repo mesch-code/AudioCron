@@ -195,6 +195,8 @@ input[type="number"]::-webkit-inner-spin-button { filter: invert(1); opacity: .5
 .empty { text-align: center; color: var(--muted); padding: 48px 20px; }
 .empty .big { font-size: 42px; margin-bottom: 10px; }
 .warnbox { background: rgba(255,180,84,.12); border: 1px solid rgba(255,180,84,.4); color: var(--orange); border-radius: 12px; padding: 12px; font-size: 14px; margin-bottom: 12px; }
+.stichtag { background: rgba(79,140,255,.1); border: 1px solid rgba(79,140,255,.4); color: var(--accent); border-radius: 12px; padding: 11px 12px; font-size: 13.5px; margin-bottom: 10px; cursor: pointer; }
+input.date-inline { width: auto; flex: 0 0 auto; }
 .qrbox { position: relative; border-radius: 14px; overflow: hidden; background: #000; aspect-ratio: 1; margin: 10px 0; }
 .qrbox video { width: 100%; height: 100%; object-fit: cover; }
 .setrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }

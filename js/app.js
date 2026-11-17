@@ -26,6 +26,64 @@ const state = {
 };
 const selected = new Set();
 
+/* ---------- Stichtag (Kontingent-Reset) ---------- */
+
+const STICH_TAG_KEY = "audiocron_stichtag";
+
+function getStichtag() {
+  return localStorage.getItem(STICH_TAG_KEY) || "";
+}
+
+function setStichtag(iso) {
+  if (iso) localStorage.setItem(STICH_TAG_KEY, iso);
+  else localStorage.removeItem(STICH_TAG_KEY);
+}
+
+function stichtagCountdown(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return "";
+  const target = new Date(y, m - 1, d);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((target - today) / 86400000);
+  if (days === 0) return "heute";
+  if (days === 1) return "morgen";
+  if (days > 0) return `in ${days} Tagen`;
+  const past = -days;
+  return past === 1 ? "seit gestern" : `seit ${past} Tagen`;
+}
+
+function openStichtagEditor() {
+  const sheet = openSheet(`
+    <h2>Kontingent-Stichtag</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Das Datum, ab dem du wieder Kontingent in der anderen Plattform hast. Wird oben in der Bibliothek angezeigt.</p>
+    <div class="form-row"><label>Stichtag</label><input id="st-date" type="date" value="${esc(getStichtag())}"></div>
+    <div id="st-preview" style="font-size:13px;color:var(--muted);margin-bottom:12px">${getStichtag() ? `⏳ ${stichtagCountdown(getStichtag())}` : ""}</div>
+    <div class="btnrow">
+      <button class="btn danger" id="st-clear" ${getStichtag() ? "" : "disabled"}>Entfernen</button>
+      <button class="btn primary" id="st-save">💾 Speichern</button>
+    </div>
+  `);
+  const input = sheet.querySelector("#st-date");
+  const preview = sheet.querySelector("#st-preview");
+  input.addEventListener("change", () => {
+    preview.textContent = input.value ? `⏳ ${stichtagCountdown(input.value)}` : "";
+  });
+  sheet.querySelector("#st-save").onclick = () => {
+    if (!input.value) { toast("Bitte Datum wählen"); return; }
+    setStichtag(input.value);
+    closeSheet();
+    toast(`Stichtag: ${fmtDate(input.value)} ✓`);
+    render();
+  };
+  sheet.querySelector("#st-clear").onclick = () => {
+    setStichtag("");
+    closeSheet();
+    toast("Stichtag entfernt");
+    render();
+  };
+}
+
 /* ---------- Router ---------- */
 
 function navigate(route) {
@@ -77,7 +135,9 @@ async function renderLibrary(view) {
     state.bulk ? exitBulk() : enterBulk();
     render();
   };
-  view.innerHTML = `
+  const st = getStichtag();
+  const stBanner = st ? `<div class="stichtag" id="st-banner" title="Stichtag bearbeiten">🗓 Wieder Kontingent ab <strong>${fmtDate(st)}</strong> · ${stichtagCountdown(st)}</div>` : "";
+  view.innerHTML = stBanner + `
     <div class="searchbar">
       <input id="q" type="search" placeholder="Titel, Autor, Sprecher suchen…" value="${esc(state.query)}">
     </div>
@@ -99,6 +159,7 @@ async function renderLibrary(view) {
     </div>
     <div id="list"></div>`;
 
+  view.querySelector("#st-banner")?.addEventListener("click", openStichtagEditor);
   view.querySelector("#q").addEventListener("input", e => {
     state.query = e.target.value;
     paintList(books);
@@ -964,6 +1025,12 @@ async function renderSettings(view) {
       <div class="enrich-track"><div class="enrich-bar" id="enrich-bar"></div></div>
     </div>
 
+    <h2 style="font-size:16px;margin:22px 0 2px">Kontingent</h2>
+    <div class="setrow">
+      <div><div class="l">Stichtag: wieder Kontingent</div><div class="s" id="st-sub">${getStichtag() ? `⏳ Ab ${fmtDate(getStichtag())} · ${stichtagCountdown(getStichtag())} – wird oben in der Bibliothek angezeigt` : "Noch nicht gesetzt – festlegen, ab wann es in der anderen Plattform wieder Kontingent gibt"}</div></div>
+      <input type="date" id="s-stichtag" class="date-inline" value="${esc(getStichtag())}">
+    </div>
+
     <h2 style="font-size:16px;margin:22px 0 2px">Suchquellen</h2>
     <p style="color:var(--muted);font-size:12.5px;margin:0 0 8px">Reihenfolge = Priorität in der Ergebnissliste. Covers werden immer automatisch über die ISBN (OpenLibrary, Google Books, Amazon) nachgeladen.</p>
     <div id="src-list">
@@ -1091,6 +1158,16 @@ async function renderSettings(view) {
     barEl.style.width = "0";
     if (!covers) toast("Online nichts neues gefunden");
     render();
+  };
+
+  view.querySelector("#s-stichtag").onchange = e => {
+    const v = e.target.value;
+    setStichtag(v);
+    const sub = view.querySelector("#st-sub");
+    sub.textContent = v
+      ? `⏳ Ab ${fmtDate(v)} · ${stichtagCountdown(v)} – wird oben in der Bibliothek angezeigt`
+      : "Noch nicht gesetzt – festlegen, ab wann es in der anderen Plattform wieder Kontingent gibt";
+    toast(v ? `Stichtag: ${fmtDate(v)} ✓` : "Stichtag entfernt");
   };
 
   view.querySelector("#s-clear").onclick = async () => {
