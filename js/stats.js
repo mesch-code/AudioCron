@@ -174,7 +174,7 @@ async function openGroupSheet(kind, key) {
 
 function coverImg(b) {
   return b.hasCover
-    ? `<img class="cover" data-coverid="${b.id}" src="" alt="">`
+    ? `<img class="cover" data-coverid="${b.id}" alt="">`
     : `<div class="cover placeholder">🎧</div>`;
 }
 
@@ -203,7 +203,7 @@ async function openDiscover(authorName, mine) {
     const cover = w.coverUrl
       ? `<img class="cover" src="${esc(w.coverUrl)}" loading="lazy" alt="">`
       : ownedBook?.hasCover
-        ? `<img class="cover" data-coverid="${ownedBook.id}" src="" alt="">`
+        ? `<img class="cover" data-coverid="${ownedBook.id}" alt="">`
         : `<div class="cover placeholder">🎧</div>`;
     return `<div class="resultcard">
       ${cover}

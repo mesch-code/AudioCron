@@ -1,4 +1,4 @@
-export const APP_VERSION = "0.8";
+export const APP_VERSION = "0.8.1";
 
 export const PLATFORMS = [
   { id: "bookbeat", label: "BookBeat" },
@@ -7,9 +7,9 @@ export const PLATFORMS = [
 ];
 
 export const STATUSES = [
-  { id: "gehoert", label: "Gehört" },
+  { id: "vormerk", label: "Vorgemerkt" },
   { id: "hoere", label: "Höre ich gerade" },
-  { id: "vormerk", label: "Vorgemerkt" }
+  { id: "gehoert", label: "Gehört" }
 ];
 
 export function platformLabel(id) {
