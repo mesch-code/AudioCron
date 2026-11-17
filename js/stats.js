@@ -167,6 +167,7 @@ async function openGroupSheet(kind, key) {
       openDetail(c.dataset.book);
     });
   });
+  hydrateCovers(sheet);
   const disc = sheet.querySelector("#discover-author");
   if (disc) disc.addEventListener("click", () => openDiscover(key, mine));
 }
@@ -190,23 +191,31 @@ async function openDiscover(authorName, mine) {
   let works = [];
   try { works = await fetchWorksByAuthor(authorName, olKey); } catch {}
   if (!works.length) {
-    sheet.innerHTML = `<div class="sheet-grip"></div><h2>${esc(authorName)} – alle Werke</h2>
+    sheet.innerHTML = `<h2>${esc(authorName)} – alle Werke</h2>
       <div class="empty">Keine Werke online gefunden.<br>Prüfe die Internetverbindung.</div>`;
     return;
   }
-  const mineKeys = new Set(mine.map(b => norm(b.title)));
+  const mineTitles = mine.map(b => norm(b.title)).filter(Boolean);
+  const mineIsbn = new Set(mine.map(b => b.isbn).filter(Boolean));
   const rows = works.slice(0, 60).map((w, i) => {
-    const owned = mineKeys.has(w.title);
+    const ownedBook = findOwned(w, mine, mineTitles, mineIsbn);
     const year = w.year ? ` (${w.year})` : "";
+    const cover = w.coverUrl
+      ? `<img class="cover" src="${esc(w.coverUrl)}" loading="lazy" alt="">`
+      : ownedBook?.hasCover
+        ? `<img class="cover" data-coverid="${ownedBook.id}" src="" alt="">`
+        : `<div class="cover placeholder">🎧</div>`;
     return `<div class="resultcard">
+      ${cover}
       <div class="bookinfo"><div class="t">${esc(w.title)}${esc(year)}</div>
       <div class="a">${esc(w.subtitle || "")}</div></div>
-      <button class="minibtn ${owned ? "done" : ""}" data-i="${i}" ${owned ? "disabled" : ""}>${owned ? "✓ gehört" : "+ fehlt"}</button>
+      <button class="minibtn ${ownedBook ? "done" : ""}" data-i="${i}" ${ownedBook ? "disabled" : ""}>${ownedBook ? "✓ gehört" : "+ fehlt"}</button>
     </div>`;
   }).join("");
-  sheet.innerHTML = `<div class="sheet-grip"></div><h2>${esc(authorName)} – alle Werke</h2>
+  sheet.innerHTML = `<h2>${esc(authorName)} – alle Werke</h2>
     <p style="color:var(--muted);font-size:13px;margin-bottom:10px">✓ = schon gehört. Mit „+ fehlt" schnell als vorgemerkt oder gehört anlegen.</p>
     <div class="results">${rows}</div>`;
+  hydrateCovers(sheet);
   sheet.querySelectorAll(".minibtn:not([disabled])").forEach(btn => {
     btn.addEventListener("click", async () => {
       const w = works[parseInt(btn.dataset.i, 10)];
@@ -218,6 +227,26 @@ async function openDiscover(authorName, mine) {
 
 function norm(s) {
   return (s || "").toLowerCase().replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
+}
+
+function isOwned(work, mineTitles, mineIsbn) {
+  if (work.isbn13 && mineIsbn.has(work.isbn13)) return true;
+  const wt = norm(work.title);
+  if (!wt) return false;
+  return mineTitles.some(mt =>
+    mt === wt ||
+    (mt.length >= 8 && (mt.includes(wt) || (wt.length >= 8 && wt.includes(mt)))));
+}
+
+function findOwned(work, mine, mineTitles, mineIsbn) {
+  return mine.find(b => {
+    if (work.isbn13 && b.isbn && work.isbn13 === b.isbn) return true;
+    const wt = norm(work.title);
+    const bt = norm(b.title);
+    if (!wt || !bt) return false;
+    return wt === bt ||
+      (bt.length >= 8 && (bt.includes(wt) || (wt.length >= 8 && wt.includes(bt))));
+  }) || null;
 }
 
 export { hydrateCovers, coverImg };

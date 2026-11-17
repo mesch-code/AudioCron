@@ -4,7 +4,8 @@ import {
 } from "./db.js";
 import {
   searchCombined, isbnLookup, barcodeSupported, startBarcodeScan, resolveCover,
-  coverCandidates, descriptionCandidates, olCoverUrlFor, fetchIsbnMetadata
+  coverCandidates, descriptionCandidates, olCoverUrlFor, fetchIsbnMetadata, resolveCoverUrl,
+  coverForIsbn, getSourceConfig, setSourceConfig, sourceLabel
 } from "./api.js";
 import {
   importOpenreadsCsv, exportOpenreadsCsv, exportJson, importJson
@@ -20,22 +21,38 @@ const state = {
   query: "",
   platform: "alle",
   status: "alle",
-  sort: "neu"
+  sort: "neu",
+  bulk: false
 };
+const selected = new Set();
 
 /* ---------- Router ---------- */
 
 function navigate(route) {
   state.route = route;
+  if (state.bulk) exitBulk();
   document.querySelectorAll(".nav-btn").forEach(b =>
     b.classList.toggle("active", b.dataset.route === route));
   document.getElementById("fab").style.display = route === "library" ? "" : "none";
   render();
 }
 
+window.addEventListener("pageshow", e => {
+  if (e.persisted) render();
+});
+
+document.addEventListener("error", e => {
+  const t = e.target;
+  if (t && t.tagName === "IMG" && t.classList.contains("cover")) {
+    t.outerHTML = `<div class="cover placeholder">🎧</div>`;
+  }
+}, true);
+
 async function render() {
   const view = document.getElementById("view");
   const title = document.getElementById("topbar-title");
+  const actions = document.getElementById("topbar-actions");
+  if (state.route !== "library") actions.innerHTML = "";
   if (state.route === "stats") {
     title.textContent = "Statistik";
     await renderStats(view);
@@ -54,6 +71,12 @@ async function render() {
 
 async function renderLibrary(view) {
   const books = await allBooks();
+  const actions = document.getElementById("topbar-actions");
+  actions.innerHTML = `<button class="chip ${state.bulk ? "active" : ""}" id="bulk-toggle">${state.bulk ? "Fertig" : "Auswahl"}</button>`;
+  actions.querySelector("#bulk-toggle").onclick = () => {
+    state.bulk ? exitBulk() : enterBulk();
+    render();
+  };
   view.innerHTML = `
     <div class="searchbar">
       <input id="q" type="search" placeholder="Titel, Autor, Sprecher suchen…" value="${esc(state.query)}">
@@ -146,6 +169,9 @@ async function paintList(books) {
   updateChipCounts(books);
   const list = filtered(books);
   const el = document.getElementById("list");
+  for (const id of [...selected]) {
+    if (!books.some(b => b.id === id)) selected.delete(id);
+  }
   if (!list.length) {
     el.innerHTML = `<div class="empty"><div class="big">🎧</div>
       ${books.length ? "Keine Treffer für deine Filter." : "Noch keine Bücher.<br>Tippe auf +, um loszulegen."}</div>`;
@@ -162,14 +188,16 @@ async function paintList(books) {
       }
     }
     html += `
-      <div class="bookcard" data-id="${b.id}">
+      <div class="bookcard ${state.bulk && selected.has(b.id) ? "selected" : ""}" data-id="${b.id}">
+        ${state.bulk ? `<span class="selbox ${selected.has(b.id) ? "on" : ""}">${selected.has(b.id) ? "✓" : ""}</span>` : ""}
         ${coverImg(b)}
         <div class="bookinfo">
           <div class="t">${esc(b.title)}${b.series ? ` <span style="color:var(--muted);font-weight:400;font-size:12px">· ${esc(b.series)}</span>` : ""}</div>
           <div class="a">${esc(b.author)}${b.narrator ? ` · <span style="font-style:italic">${esc(b.narrator)}</span>` : ""}</div>
+          ${b.tags ? `<div class="tagsline">${esc(b.tags)}</div>` : ""}
           <div class="bookmeta">
             <span class="badge ${b.platform}">${esc(platformLabel(b.platform))}</span>
-            <span class="badge ${b.status} tappable" data-cycle="${b.id}" title="Status wechseln">${esc(statusLabel(b.status))} ⟳</span>
+            ${state.bulk ? "" : `<span class="badge ${b.status} tappable" data-cycle="${b.id}" title="Status wechseln">${esc(statusLabel(b.status))} ⟳</span>`}
             ${b.lengthMin ? `<span style="color:var(--muted);font-size:11.5px">${fmtHours(b.lengthMin)}</span>` : ""}
             ${b.status === "gehoert" && b.finishDate ? `<span style="color:var(--muted);font-size:11.5px">${fmtDate(b.finishDate)}</span>` : ""}
             ${stars(b.rating)}
@@ -177,8 +205,72 @@ async function paintList(books) {
         </div>
       </div>`;
   }
-  el.innerHTML = `<div class="listcount">${list.length} ${list.length === 1 ? "Hörbuch" : "Hörbücher"}</div>` + html;
+  const bulkBar = state.bulk ? `
+    <div class="bulkbar">
+      <span class="bulksel">${selected.size}/${list.length}</span>
+      <button class="chip" id="bulk-all">${selected.size && selected.size === list.length ? "Keine" : "Alle"}</button>
+      <button class="chip" id="bulk-status">Status</button>
+      <button class="chip" id="bulk-platform">Plattform</button>
+      <button class="chip" id="bulk-tag">🏷 Tags</button>
+      <button class="chip danger" id="bulk-del" ${selected.size ? "" : "disabled"}>🗑 Löschen</button>
+    </div>` : "";
+  el.innerHTML = `<div class="listcount">${list.length} ${list.length === 1 ? "Hörbuch" : "Hörbücher"}</div>` + bulkBar + html;
   hydrateCovers(el);
+  if (state.bulk) {
+    el.querySelectorAll(".bookcard").forEach(c =>
+      c.addEventListener("click", () => {
+        const id = c.dataset.id;
+        if (selected.has(id)) selected.delete(id); else selected.add(id);
+        paintList(books);
+      }));
+    const bulkAction = (id, fn) => {
+      const btn = el.querySelector("#" + id);
+      if (btn) btn.onclick = () => fn(books);
+    };
+    bulkAction("bulk-all", () => {
+      const visible = filtered(books).map(b => b.id);
+      if (visible.every(id => selected.has(id))) visible.forEach(id => selected.delete(id));
+      else visible.forEach(id => selected.add(id));
+      paintList(books);
+    });
+    bulkAction("bulk-status", () => openBulkChoice("Status",
+      STATUSES.map(s => ({ value: s.id, label: s.label })), async (value, ids) => {
+        for (const id of ids) {
+          const b = await getBook(id);
+          if (!b) continue;
+          b.status = value;
+          if (value === "gehoert" && !b.finishDate) {
+            b.finishDate = new Date().toISOString().slice(0, 10);
+          }
+          if (value !== "gehoert") b.finishDate = "";
+          await putBook(b);
+        }
+        toast(`${ids.length} Bücher aktualisiert`);
+      }));
+    bulkAction("bulk-platform", () => openBulkChoice("Plattform",
+      PLATFORMS.map(p => ({ value: p.id, label: p.label })), async (value, ids) => {
+        for (const id of ids) {
+          const b = await getBook(id);
+          if (!b) continue;
+          b.platform = value;
+          await putBook(b);
+        }
+        toast(`${ids.length} Bücher aktualisiert`);
+      }));
+    bulkAction("bulk-tag", () => openBulkTags(books));
+    bulkAction("bulk-del", async () => {
+      if (!selected.size) return;
+      if (!confirm(`${selected.size} Bücher wirklich löschen?`)) return;
+      const ids = [...selected];
+      for (const id of ids) await deleteBook(id);
+      selected.clear();
+      toast(`${ids.length} gelöscht`);
+      const fresh = await allBooks();
+      paintList(fresh);
+      updateChipCounts(fresh);
+    });
+    return;
+  }
   el.querySelectorAll(".bookcard").forEach(c =>
     c.addEventListener("click", () => openDetail(c.dataset.id)));
   el.querySelectorAll(".badge.tappable").forEach(badge => {
@@ -187,6 +279,97 @@ async function paintList(books) {
       await cycleStatus(badge.dataset.cycle, badge);
     });
   });
+}
+
+function enterBulk() {
+  state.bulk = true;
+  selected.clear();
+}
+
+function exitBulk() {
+  state.bulk = false;
+  selected.clear();
+}
+
+function openBulkChoice(title, options, onPick) {
+  if (!selected.size) { toast("Erst Bücher auswählen"); return; }
+  const sheet = openSheet(`
+    <h2>${esc(title)} ändern</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Für ${selected.size} ausgewählte Bücher:</p>
+    <div class="addoptions">
+      ${options.map(o => `<button class="addopt" data-value="${esc(o.value)}"><span class="lbl">${esc(o.label)}</span></button>`).join("")}
+    </div>
+  `);
+  sheet.querySelectorAll(".addopt").forEach(btn => {
+    btn.onclick = async () => {
+      const ids = [...selected];
+      closeSheet();
+      await onPick(btn.dataset.value, ids);
+      selected.clear();
+      render();
+    };
+  });
+}
+
+function parseTags(s) {
+  return (s || "").split(",").map(t => t.trim()).filter(Boolean);
+}
+
+function mergeTags(existing, add, remove) {
+  const rmKeys = new Set(remove.map(t => t.toLowerCase()));
+  const out = parseTags(existing).filter(t => !rmKeys.has(t.toLowerCase()));
+  const seen = new Set(out.map(t => t.toLowerCase()));
+  for (const t of add) {
+    if (!seen.has(t.toLowerCase())) { out.push(t); seen.add(t.toLowerCase()); }
+  }
+  return out.join(", ");
+}
+
+function openBulkTags(books) {
+  if (!selected.size) { toast("Erst Bücher auswählen"); return; }
+  const counts = new Map();
+  for (const b of books) {
+    for (const t of parseTags(b.tags)) {
+      const k = t.toLowerCase();
+      if (!counts.has(k)) counts.set(k, { label: t, n: 0 });
+      counts.get(k).n++;
+    }
+  }
+  const existing = [...counts.entries()].sort((a, b) => b[1].n - a[1].n);
+  const sheet = openSheet(`
+    <h2>Tags ändern</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Für ${selected.size} ausgewählte Bücher. Mehrere neue Tags durch Komma getrennt.</p>
+    <div class="form-row"><label>Hinzufügen</label><input id="bt-add" placeholder="z.B. Krimi, Oslo"></div>
+    ${existing.length ? `<div class="grouphead">Vorhandene Tags – antippen zum Entfernen</div>
+      <div class="chiprow" id="bt-remove" style="flex-wrap:wrap">${existing.map(([k, v]) =>
+        `<button class="chip" data-tag="${esc(k)}">${esc(v.label)} <span class="cnt">${v.n}</span></button>`).join("")}</div>
+      <p style="color:var(--muted);font-size:12px;margin:4px 0 10px">Erneut antippen hebt die Entfernung auf.</p>` : ""}
+    <div class="btnrow"><button class="btn primary block" id="bt-apply">Übernehmen</button></div>
+  `);
+  const removeSel = new Set();
+  sheet.querySelector("#bt-remove")?.addEventListener("click", e => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    const tag = chip.dataset.tag;
+    if (removeSel.has(tag)) { removeSel.delete(tag); chip.classList.remove("danger-on"); }
+    else { removeSel.add(tag); chip.classList.add("danger-on"); }
+  });
+  sheet.querySelector("#bt-apply").onclick = async () => {
+    const add = parseTags(sheet.querySelector("#bt-add").value);
+    const remove = [...removeSel].map(k => counts.get(k)?.label || k);
+    if (!add.length && !remove.length) { toast("Nichts geändert"); return; }
+    const ids = [...selected];
+    for (const id of ids) {
+      const b = await getBook(id);
+      if (!b) continue;
+      b.tags = mergeTags(b.tags, add, remove);
+      await putBook(b);
+    }
+    closeSheet();
+    selected.clear();
+    toast("Tags aktualisiert");
+    render();
+  };
 }
 
 async function cycleStatus(id, badgeEl) {
@@ -219,7 +402,9 @@ export async function openDetail(id) {
   const sheet = openSheet(`
     <h2>${esc(b.title)}</h2>
     <div class="detail-head">
-      <img src="${esc(coverUrl || "")}" ${coverUrl ? "" : 'style="display:none"'} alt="">
+      ${coverUrl
+        ? `<img src="${esc(coverUrl)}" alt="" onerror="this.style.display='none'">`
+        : `<div class="cover placeholder" style="width:104px;height:148px;border-radius:8px;font-size:34px">🎧</div>`}
       <div style="flex:1">
         <div style="font-size:13px;color:var(--muted)">${esc(b.author)}</div>
         <div class="bookmeta" style="margin-top:8px">
@@ -329,21 +514,41 @@ function renderSearchResults(out, results) {
     out.innerHTML = `<div class="empty">Nichts gefunden. Versuche manuell hinzuzufügen.</div>`;
     return;
   }
-  out.innerHTML = `<div class="results">` + results.map((r, i) => `
-    <div class="resultcard">
-      ${r.coverUrl ? `<img class="cover" src="${esc(r.coverUrl)}" loading="lazy" alt="">` : `<div class="cover placeholder">🎧</div>`}
-      <div class="bookinfo">
-        <div class="t">${esc(r.title)}</div>
-        <div class="a">${esc(r.author)}${r.year ? ` · ${r.year}` : ""}</div>
-      </div>
-      <button class="minibtn" data-i="${i}">+ Hinzufügen</button>
-    </div>`).join("") + `</div>`;
-  out.querySelectorAll(".minibtn").forEach(btn => {
-    btn.onclick = () => {
-      const r = results[parseInt(btn.dataset.i, 10)];
-      openBookForm(null, r);
-    };
-  });
+  let shown = 5;
+  const paint = () => {
+    const visible = results.slice(0, shown);
+    out.innerHTML = `<div class="results">` + visible.map((r, i) => `
+      <div class="resultcard" ${!r.coverUrl && r.isbn13 ? `data-isbn="${esc(r.isbn13)}"` : ""}>
+        ${r.coverUrl ? `<img class="cover" src="${esc(r.coverUrl)}" loading="lazy" alt="">` : `<div class="cover placeholder">🎧</div>`}
+        <div class="bookinfo">
+          <div class="t">${esc(r.title)}</div>
+          <div class="a">${esc(r.author)}${r.year ? ` · ${r.year}` : ""}${r.series ? ` · <span style="font-style:italic">${esc(r.series)}</span>` : ""}</div>
+        </div>
+        <button class="minibtn" data-i="${i}">+ Hinzufügen</button>
+      </div>`).join("") + `</div>` +
+      (results.length > shown
+        ? `<button class="btn block" id="s-more" style="margin-top:10px">Weitere ${Math.min(10, results.length - shown)} von ${results.length - shown} laden</button>`
+        : "");
+    out.querySelectorAll(".minibtn").forEach(btn => {
+      btn.onclick = () => openBookForm(null, results[parseInt(btn.dataset.i, 10)]);
+    });
+    const more = out.querySelector("#s-more");
+    if (more) more.onclick = () => { shown += 10; paint(); };
+    out.querySelectorAll(".resultcard[data-isbn]").forEach(async card => {
+      try {
+        const r = results[parseInt(card.querySelector(".minibtn").dataset.i, 10)];
+        const url = await coverForIsbn(card.dataset.isbn, r?.title, r?.author);
+        if (!url) return;
+        const ph = card.querySelector(".cover.placeholder");
+        if (ph) {
+          ph.outerHTML = `<img class="cover" src="${esc(url)}" loading="lazy" alt="">`;
+          const r = results[parseInt(card.querySelector(".minibtn").dataset.i, 10)];
+          if (r) r.coverUrl = url;
+        }
+      } catch {}
+    });
+  };
+  paint();
 }
 
 async function openScanAdd() {
@@ -440,6 +645,7 @@ export async function openBookForm(existing, result = null) {
       <div class="form-row"><label>Verlag</label><input id="f-publisher" value="${esc(b.publisher)}"></div>
     </div>
     <div class="form-row"><label>Notizen</label><textarea id="f-notes" rows="2">${esc(b.notes)}</textarea></div>
+    <div class="form-row"><label>Tags (durch Komma getrennt)</label><input id="f-tags" value="${esc(b.tags || "")}" placeholder="z.B. Krimi, Oslo, Empfehlung"></div>
     ${!existing ? `<div id="coverstatus" style="font-size:12.5px;color:var(--muted);margin-bottom:10px">${b.coverUrl ? "Cover wird geladen…" : "Kein Cover online gefunden – du kannst später in der App danach suchen."}</div>` : ""}
     <div class="btnrow">
       ${result && !existing ? `<button class="btn" id="f-reload">🔄 Neu laden</button>` : ""}
@@ -484,6 +690,7 @@ export async function openBookForm(existing, result = null) {
     b.isbn = sheet.querySelector("#f-isbn").value.trim().replace(/[^0-9Xx]/g, "");
     b.publisher = sheet.querySelector("#f-publisher").value.trim();
     b.notes = sheet.querySelector("#f-notes").value.trim();
+    b.tags = sheet.querySelector("#f-tags").value.trim();
     if (!b.addedDate) b.addedDate = new Date().toISOString().slice(0, 10);
     await putBook(b);
     closeSheet();
@@ -569,20 +776,26 @@ async function openCoverPicker(book) {
     paint(fresh);
     e.target.textContent = "🔍 Nochmal suchen";
   };
-  sheet.querySelector("#cp-url").onclick = () => {
-    const url = prompt("Cover-URL (https://…):");
-    if (url && url.startsWith("http")) {
-      storeCover(book.id, url).then(async ok => {
-        if (ok) {
-          book.hasCover = true;
-          book.coverUrl = url;
-          await putBook(book);
-          closeSheet();
-          toast("Cover übernommen ✓");
-          render();
-        } else toast("URL konnte nicht geladen werden");
-      });
+  sheet.querySelector("#cp-url").onclick = async () => {
+    const url = prompt("Bild-URL (https://… endet auf .jpg/.png) oder Amazon-/BookBeat-Produktlink:");
+    if (!url) return;
+    if (!url.startsWith("http")) { toast("Bitte mit https:// beginnen"); return; }
+    const resolved = await resolveCoverUrl(url);
+    if (!resolved) {
+      toast(/amazon\./i.test(url)
+        ? "Kein Cover für diesen Amazon-Link gefunden"
+        : "Das ist keine direkte Bild-URL. Bitte Bildadresse (endet z.B. auf .jpg) oder Amazon-Produktlink eingeben.");
+      return;
     }
+    const ok = await storeCover(book.id, resolved);
+    if (ok) {
+      book.hasCover = true;
+      book.coverUrl = resolved;
+      await putBook(book);
+      closeSheet();
+      toast("Cover übernommen ✓");
+      render();
+    } else toast("Cover konnte nicht geladen werden");
   };
 }
 
@@ -734,6 +947,20 @@ async function renderSettings(view) {
       <div class="enrich-track"><div class="enrich-bar" id="enrich-bar"></div></div>
     </div>
 
+    <h2 style="font-size:16px;margin:22px 0 2px">Suchquellen</h2>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 8px">Reihenfolge = Priorität in der Ergebnissliste. Covers werden immer automatisch über die ISBN (OpenLibrary, Google Books, Amazon) nachgeladen.</p>
+    <div id="src-list">
+      ${getSourceConfig().map((c, i, arr) => `
+        <div class="setrow">
+          <div><div class="l">${esc(sourceLabel(c.id))}</div><div class="s">${c.on ? "aktiv" : "deaktiviert"}</div></div>
+          <div style="display:flex;gap:6px">
+            <button class="btn" data-src-up="${c.id}" ${i === 0 ? "disabled" : ""}>↑</button>
+            <button class="btn" data-src-down="${c.id}" ${i === arr.length - 1 ? "disabled" : ""}>↓</button>
+            <button class="btn ${c.on ? "" : "danger"}" data-src-tog="${c.id}">${c.on ? "✓" : "✕"}</button>
+          </div>
+        </div>`).join("")}
+    </div>
+
     <h2 style="font-size:16px;margin:22px 0 2px">Daten</h2>
     <div class="setrow">
       <div><div class="l">Alle Daten löschen</div><div class="s">Unwiderruflich – erst Export nutzen!</div></div>
@@ -803,6 +1030,26 @@ async function renderSettings(view) {
     }
     fileJson.value = "";
   };
+
+  const moveSource = (id, dir) => {
+    const cfg = getSourceConfig();
+    const i = cfg.findIndex(x => x.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= cfg.length) return;
+    [cfg[i], cfg[j]] = [cfg[j], cfg[i]];
+    setSourceConfig(cfg);
+    renderSettings(view);
+  };
+  view.querySelectorAll("[data-src-up]").forEach(btn => btn.onclick = () => moveSource(btn.dataset.srcUp, -1));
+  view.querySelectorAll("[data-src-down]").forEach(btn => btn.onclick = () => moveSource(btn.dataset.srcDown, 1));
+  view.querySelectorAll("[data-src-tog]").forEach(btn => btn.onclick = () => {
+    const cfg = getSourceConfig();
+    const c = cfg.find(x => x.id === btn.dataset.srcTog);
+    if (!c) return;
+    c.on = !c.on;
+    setSourceConfig(cfg);
+    renderSettings(view);
+  });
 
   view.querySelector("#s-covers").onclick = async (e) => {
     const btn = e.target;

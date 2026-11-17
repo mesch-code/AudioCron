@@ -201,3 +201,22 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); bo
 .enrich-bar { height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
 .spinner { width: 26px; height: 26px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; margin: 24px auto; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Auswahl-Modus (Massenänderung) */
+.bulkbar {
+  position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px 10px; margin-bottom: 10px;
+}
+.bulkbar .bulksel { font-size: 13px; font-weight: 700; color: var(--accent); margin-right: 4px; }
+.bulkbar .chip.danger { color: var(--red); border-color: rgba(255,107,107,.5); }
+.bulkbar .chip:disabled { opacity: .4; cursor: default; }
+#topbar-actions .chip { padding: 6px 12px; }
+.selbox {
+  flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; border: 2px solid var(--muted);
+  display: flex; align-items: center; justify-content: center; font-size: 14px; color: #fff;
+}
+.selbox.on { background: var(--accent); border-color: var(--accent); }
+.bookcard.selected { border-color: var(--accent); background: rgba(79,140,255,.08); }
+.chip.danger-on { background: rgba(255,107,107,.18); border-color: var(--red); color: var(--red); text-decoration: line-through; }
+.tagsline { color: var(--muted); font-size: 11.5px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tagsline::before { content: "🏷 "; font-size: 10px; }

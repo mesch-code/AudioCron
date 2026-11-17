@@ -1,4 +1,4 @@
-const VERSION = "AudioCron-v0.4";
+﻿const VERSION = "AudioCron-v0.8";
 const SHELL_CACHE = VERSION + "-shell";
 const COVER_CACHE = VERSION + "-covers";
 
@@ -69,6 +69,7 @@ self.addEventListener("fetch", e => {
   if (url.hostname.endsWith("covers.openlibrary.org") ||
       url.hostname === "books.google.com" ||
       url.hostname === "covers.google.com") {
+    if (e.request.method === "HEAD") return;
     e.respondWith(
       caches.open(COVER_CACHE).then(async cache => {
         const cached = await cache.match(e.request);
@@ -80,7 +81,8 @@ self.addEventListener("fetch", e => {
         }
         try {
           const res = await fetch(e.request);
-          if (res.ok) cache.put(e.request, res.clone());
+          const len = parseInt(res.headers.get("content-length") || "0", 10);
+          if (res.ok && (!len || len >= 200)) cache.put(e.request, res.clone());
           return res;
         } catch (err) {
           return new Response("", { status: 503 });

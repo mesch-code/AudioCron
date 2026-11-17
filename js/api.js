@@ -37,11 +37,12 @@ function isGermanResult(r) {
   return langs.includes("ger") || langs.includes("de");
 }
 
-export async function searchBooks(query, { isbn = false } = {}) {
+export async function searchBooks(query, { isbn = false, lang = null } = {}) {
   const fields = "key,title,subtitle,author_name,author_key,cover_i,first_publish_year,isbn,publisher,series,number_of_pages_median,language";
+  const langParam = lang ? `&language=${encodeURIComponent(lang)}` : "";
   const url = isbn
     ? `${OL}/search.json?q=isbn:${encodeURIComponent(query)}&limit=10&fields=${fields}`
-    : `${OL}/search.json?q=${encodeURIComponent(query)}&limit=15&fields=${fields}`;
+    : `${OL}/search.json?q=${encodeURIComponent(query)}${langParam}&limit=15&fields=${fields}`;
   try {
     const res = await fetch(url, { headers: olHeaders() });
     if (!res.ok) throw new Error("OL " + res.status);
@@ -124,22 +125,288 @@ export async function searchGermanAudiobooks(query) {
   return searchGoogle(query);
 }
 
+export async function searchLobid(query, limit = 15) {
+  const url = `https://lobid.org/resources/search?q=${encodeURIComponent(query)}&size=${limit}`;
+  try {
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!res.ok) throw new Error("lobid " + res.status);
+    const data = await res.json();
+    const one = (v) => Array.isArray(v) ? (v.length ? v[0] : "") : (v || "");
+    return (data.member || []).map(m => {
+      const isbns = (m.isbn || []).map(s => String(s).replace(/[^0-9Xx]/g, ""));
+      const years = (m.publication || [])
+        .map(p => parseInt(p.startDate, 10))
+        .filter(n => !isNaN(n));
+      const contribs = (m.contribution || [])
+        .map(c => c.agent && c.agent.label ? c.agent.label : null)
+        .filter(Boolean);
+      const langs = (m.language || []).map(l => l.id || l.label || "");
+      return {
+        source: "lobid",
+        key: String(m.id || "").replace(/#!$/, ""),
+        title: one(m.title),
+        subtitle: one(m.otherTitleInformation),
+        author: contribs[0] || "",
+        authors: contribs,
+        narrator: "",
+        series: "",
+        publisher: "",
+        year: years[0] || null,
+        isbn13: isbns.find(s => s.length === 13) || isbns[0] || "",
+        coverUrl: null,
+        rating: null,
+        pages: null,
+        olAuthorKey: null,
+        languages: langs.length ? langs : ["de"]
+      };
+    }).filter(r => r.title);
+  } catch (e) {
+    console.warn("lobid-Suche fehlgeschlagen", e);
+    return [];
+  }
+}
+
+function decodeXml(s) {
+  return String(s)
+    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(parseInt(d, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (m, d) => String.fromCharCode(parseInt(d, 16)))
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function splitDnbTitle(full) {
+  let series = "";
+  let author = "";
+  let subtitle = "";
+  let main = full.trim();
+  const slash = main.indexOf(" / ");
+  if (slash !== -1) {
+    author = main.slice(slash + 3).trim();
+    main = main.slice(0, slash).trim();
+  }
+  const dash = main.indexOf(" - ");
+  if (dash !== -1) {
+    series = main.slice(dash + 3).trim();
+    main = main.slice(0, dash).trim();
+  }
+  const colon = main.indexOf(" : ");
+  if (colon !== -1) {
+    subtitle = main.slice(colon + 3).trim();
+    main = main.slice(0, colon).trim();
+  }
+  return { title: main, subtitle, series, author };
+}
+
+function cleanDnbPerson(s) {
+  s = String(s).replace(/\s*\[[^\]]*\]/g, "").trim();
+  const m = s.match(/^([^,;]{2,}),\s+(\S.*)$/);
+  if (m && !/ und | u\. /i.test(s)) return `${m[2]} ${m[1]}`;
+  return s;
+}
+
+export async function searchDnb(query, limit = 12) {
+  const terms = norm(query).split(/\s+/).filter(Boolean).slice(0, 8);
+  if (!terms.length) return [];
+  const srq = terms.map(t => `WOE="${t}"`).join(" and ");
+  const url = `https://services.dnb.de/sru/dnb?version=1.1&operation=searchRetrieve&query=${encodeURIComponent(srq)}&maximumRecords=${limit}&recordSchema=oai_dc`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("DNB " + res.status);
+    const xml = await res.text();
+    const blocks = xml.match(/<record>[\s\S]*?<\/record>/g) || [];
+    return blocks.map(block => {
+      const texts = (tag) => [...(block.match(new RegExp(`<dc:${tag}[^>]*>([\\s\\S]*?)</dc:${tag}>`, "g")) || [])]
+        .map(m => decodeXml(m.replace(new RegExp(`</?dc:${tag}[^>]*>`, "g"), "")).trim())
+        .filter(Boolean);
+      const titleRaw = texts("title")[0] || "";
+      const { title, subtitle, series, author: titleAuthor } = splitDnbTitle(titleRaw);
+      const creators = texts("creator").map(cleanDnbPerson).filter(Boolean);
+      const dateRaw = (texts("date")[0] || "").match(/\d{4}/);
+      const isbn13 = (texts("identifier")
+        .map(v => v.replace(/[^0-9]/g, ""))
+        .find(v => /^(97[89])\d{10}$/.test(v)) || "");
+      const idn = (texts("identifier")
+        .map(v => v.replace(/[^0-9Xx]/g, ""))
+        .find(v => /^\d{8}[\dXx]$/.test(v)) || "");
+      return {
+        source: "dnb",
+        key: idn ? `dnb:${idn}` : title,
+        title,
+        subtitle,
+        author: creators[0] || titleAuthor,
+        authors: creators.length ? creators : (titleAuthor ? [titleAuthor] : []),
+        narrator: "",
+        series,
+        publisher: "",
+        year: dateRaw ? parseInt(dateRaw[0], 10) : null,
+        isbn13,
+        coverUrl: null,
+        rating: null,
+        pages: null,
+        olAuthorKey: null,
+        languages: ["de"]
+      };
+    }).filter(r => r.title);
+  } catch (e) {
+    console.warn("DNB-Suche fehlgeschlagen", e);
+    return [];
+  }
+}
+
+const SOURCE_DEFS = {
+  dnb: "Deutsche Nationalbibliothek",
+  lobid: "lobid / SWB-Verbundkatalog",
+  openlibrary: "OpenLibrary",
+  google: "Google Books"
+};
+const DEFAULT_SOURCE_ORDER = ["dnb", "lobid", "openlibrary", "google"];
+
+export function getSourceConfig() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("audiocron_sources") || "null");
+    if (Array.isArray(raw)) {
+      const out = raw
+        .filter(x => x && SOURCE_DEFS[x.id])
+        .map(x => ({ id: x.id, on: x.on !== false }));
+      for (const id of DEFAULT_SOURCE_ORDER) {
+        if (!out.some(x => x.id === id)) out.push({ id, on: true });
+      }
+      return out;
+    }
+  } catch {}
+  return DEFAULT_SOURCE_ORDER.map(id => ({ id, on: true }));
+}
+
+export function setSourceConfig(cfg) {
+  localStorage.setItem("audiocron_sources", JSON.stringify(cfg));
+}
+
+export function sourceLabel(id) {
+  return SOURCE_DEFS[id] || id;
+}
+
+function runSource(id, query) {
+  if (id === "dnb") return searchDnb(query);
+  if (id === "lobid") return searchLobid(query);
+  if (id === "openlibrary") return searchBooks(query, { lang: "german" });
+  if (id === "google") return searchGermanAudiobooks(query);
+  return Promise.resolve([]);
+}
+
 export async function searchCombined(query) {
-  const [ol, gb] = await Promise.all([searchBooks(query), searchGermanAudiobooks(query)]);
+  const active = getSourceConfig().filter(c => c.on);
+  const lists = await Promise.all(active.map(c => runSource(c.id, query)));
+  let merged = mergeResults(...lists);
+  const hasOl = active.some(c => c.id === "openlibrary");
+  if (merged.length < 3 && hasOl) {
+    merged = mergeResults(merged, await searchBooks(query));
+  }
+  if (merged.length < 3) {
+    for (const q2 of fallbackQueries(query)) {
+      const more = await Promise.all(active.map(c => runSource(c.id, q2)));
+      merged = mergeResults(merged, ...more);
+      if (merged.length >= 3) break;
+      if (hasOl) {
+        merged = mergeResults(merged, await searchBooks(q2));
+        if (merged.length >= 3) break;
+      }
+    }
+  }
+  return merged;
+}
+
+async function olCoverByQuery(q) {
+  try {
+    const res = await fetch(
+      `https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=5&fields=key,cover_i,title`,
+      { headers: olHeaders() });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const withCover = (data.docs || []).find(d => d.cover_i);
+    return withCover ? `https://covers.openlibrary.org/b/id/${withCover.cover_i}-M.jpg` : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function coverForIsbn(isbn, title, author) {
+  const clean = String(isbn || "").replace(/[^0-9Xx]/g, "");
+  if (clean.length >= 10) {
+    try {
+      const res = await fetch(
+        `https://openlibrary.org/search.json?q=isbn:${encodeURIComponent(clean)}&limit=3&fields=cover_i`,
+        { headers: olHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const withCover = (data.docs || []).find(d => d.cover_i);
+        if (withCover) return `https://covers.openlibrary.org/b/id/${withCover.cover_i}-M.jpg`;
+      }
+    } catch {}
+    const gb = await gbSearch(
+      `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(clean)}&maxResults=1&country=DE&hl=de`);
+    if (gb[0]?.coverUrl) return gb[0].coverUrl;
+  }
+  const t = (title || "").trim();
+  const a = (author || "").trim();
+  if (t) {
+    const byTitle = await olCoverByQuery(a ? `${t} ${a}` : t);
+    if (byTitle) return byTitle;
+    if (a) {
+      const byTitleOnly = await olCoverByQuery(t);
+      if (byTitleOnly) return byTitleOnly;
+    }
+  }
+  return null;
+}
+
+function fallbackQueries(query) {
+  const out = [];
+  const stripped = stripFillers(query);
+  if (stripped && stripped !== norm(query)) out.push(stripped);
+  const words = norm(stripped || query).split(" ").filter(Boolean);
+  if (words.length >= 3) {
+    for (let i = 0; i < words.length && out.length < 5; i++) {
+      out.push(words.filter((_, j) => j !== i).join(" "));
+    }
+  }
+  if (words.length >= 2) {
+    for (const w of [...words].sort((a, b) => b.length - a.length)) {
+      if (w.length >= 4 && out.length < 7) out.push(w);
+    }
+  }
+  return out;
+}
+
+function mergeResults(...lists) {
   const seen = new Set();
   const merged = [];
-  for (const r of [...gb, ...ol]) {
-    const k = norm(r.title) + "|" + norm(r.author);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    merged.push(r);
+  for (const list of lists) {
+    for (const r of list) {
+      const authorKey = norm(r.author).split(" ").filter(Boolean).sort().join(" ");
+      const k = norm(r.title) + "|" + authorKey;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(r);
+    }
   }
   return merged.sort((a, b) => (isGermanResult(a) ? 0 : 1) - (isGermanResult(b) ? 0 : 1));
 }
 
+function stripFillers(q) {
+  const stop = new Set(["und", "der", "die", "das", "ein", "eine", "im", "am", "mit", "von", "the", "of"]);
+  const parts = norm(q).split(" ").filter(w => w && !stop.has(w));
+  return parts.length >= 2 && parts.join(" ") !== norm(q) ? parts.join(" ") : "";
+}
+
 export async function isbnLookup(isbn) {
-  const ol = await searchBooks(isbn, { isbn: true });
-  if (ol.length) return ol;
+  const [ol, dnb, lob] = await Promise.all([
+    searchBooks(isbn, { isbn: true }),
+    searchDnb(isbn),
+    searchLobid(isbn)
+  ]);
+  const merged = mergeResults(ol, dnb, lob);
+  if (merged.length) return merged;
   return searchGoogle(isbn);
 }
 
@@ -354,6 +621,40 @@ export async function descriptionCandidates(book) {
     } catch {}
   }
   return out;
+}
+
+/* Deckt Amazon-Produktlinks per ASIN über den Media-Server ab; normale Bild-URLs direkt. */
+export async function resolveCoverUrl(input) {
+  const url = (input || "").trim();
+  if (!url.startsWith("http")) return null;
+  const m = url.match(/amazon\.[a-z.]{2,}\/(?:[^/?#]+\/)?(?:dp|gp\/product|product-reviewed)\/([A-Z0-9]{10})/i);
+  if (m) {
+    const asin = m[1];
+    const candidates = [
+      `https://m.media-amazon.com/images/I/${asin}L._SCRM_.jpg`,
+      `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SCRM_SCLZZZZZZZ_V1_.jpg`,
+      `https://m.media-amazon.com/images/P/${asin}.01._SCRM_SCLZZZZZZZ_V1_.jpg`
+    ];
+    for (const img of candidates) {
+      try {
+        const res = await fetch(img);
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob.type.startsWith("image") && blob.size > 1200) return img;
+        }
+      } catch {}
+    }
+    return null;
+  }
+  if (/\.(jpe?g|png|webp|gif|avif)(\?|#|$)/i.test(url)) return url;
+  try {
+    const res = await fetch(url);
+    if (res.ok) {
+      const blob = await res.blob();
+      if (blob.type.startsWith("image")) return url;
+    }
+  } catch {}
+  return null;
 }
 
 /* Barcode / QR via native BarcodeDetector, sonst manuelle Eingabe */
