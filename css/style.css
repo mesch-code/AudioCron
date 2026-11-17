@@ -1,10 +1,11 @@
 :root {
+  color-scheme: dark;
   --bg: #12161f;
   --surface: #1b212e;
   --surface2: #232b3b;
   --border: #2e3749;
   --text: #e8ecf4;
-  --muted: #93a0b4;
+  --muted: #a3aec2;
   --accent: #4f8cff;
   --accent2: #7c5cff;
   --green: #3ecf8e;
@@ -61,6 +62,10 @@ input, select, textarea {
   border-radius: 10px; padding: 11px 12px; font-size: 15px; width: 100%;
 }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+::placeholder { color: #8290a6; opacity: 1; }
+select option { background: var(--surface2); color: var(--text); }
+input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: .65; cursor: pointer; }
+input[type="number"]::-webkit-inner-spin-button { filter: invert(1); opacity: .5; }
 .chiprow { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
 .chip {
   flex: 0 0 auto; padding: 7px 13px; border-radius: 999px; font-size: 13px;
